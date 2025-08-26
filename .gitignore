@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+*.pickle
+
+# data files
+*.parquet
+*.csv
+*.tsv
+*.json
+
+# Virtual environments
+venv*/
+.venv*/
+env*/
+.venv_youtube_transcripts/
+
+# VSCode settings
+.vscode/
+*.code-workspace
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# NLTK downloads (se algum arquivo baixado ficar no projeto)
+nltk_data/
+
+# Dados temporários e arquivos locais
+*.mp3
+*.wav
+*.zip
+downloads/
+*.txt
+welcome-to-docker/
+*.Zone.Identifier
+
+# Windows ADS / odd colon-suffixed files
+/files.zip:Zone.Identifier
+*:[Zz]one.Identifier
+
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Lock files
+uv.lock
+poetry.lock
+Pipfile.lock
