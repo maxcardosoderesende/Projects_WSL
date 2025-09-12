@@ -38,6 +38,7 @@ nltk_data/
 downloads/
 *.txt
 welcome-to-docker/
+Diversos/
 *.Zone.Identifier
 
 # Windows ADS / odd colon-suffixed files
