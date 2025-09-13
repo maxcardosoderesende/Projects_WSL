@@ -26,3 +26,7 @@ It contains both applied projects (competitions, case studies) and research-orie
 - Add more documentation for each project
 - Improve automation and testing of pipelines
 - Deploy selected models into production environments
+
+## Contacts:
+- 📧 Email: [maxcardosoderesende@gmail.com](mailto:maxcardosoderesende@gmail.com)  
+- 💻 GitHub: [github.com/maxcardosoderesende](https://github.com/maxcardosoderesende)  
