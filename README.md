@@ -7,7 +7,8 @@ This repository is a collection of experiments and implementations in the field 
 It contains both applied projects (competitions, case studies) and research-oriented notebooks.
 
 ## 📂 Structure
-- **AlphaNova_Competition_Aug_2025/** → Work for the AlphaNova ML competition - Stock Return prediction
+- **Time Series Modelings** → Classical Econometrics and ML algorithns to predict/forecast time_series
+- **Trading Competitions** → Work for the AlphaNova ML competition - Stock Return prediction
 - **NLP/** → Natural Language Processing projects, including text mining, embeddings, and LLM fine-tuning.
 
 ## 🚀 Technologies
