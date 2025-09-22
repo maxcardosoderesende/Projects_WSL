@@ -35,7 +35,7 @@ env*/
 # NLTK downloads (se algum arquivo baixado ficar no projeto)
 nltk_data/
 
-# Dados temporários e arquivos locais
+# Local file/folders
 *.mp3
 *.wav
 *.zip
@@ -43,6 +43,7 @@ downloads/
 *.txt
 welcome-to-docker/
 Diversos/
+courses/
 *.Zone.Identifier
 
 # Windows ADS / odd colon-suffixed files
