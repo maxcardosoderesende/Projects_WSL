@@ -56,7 +56,7 @@ We run several model families in sequence to test assumptions:
 ---
 
 ## Tests & Validation
-- **Stationarity**: Augmented Dickey–Fuller (ADF) tests by market.  
+- **Stationarity**: Augmented Dickey–Fuller (ADF) tests by KMA market area.  
 - **Causality**: Pairwise Granger causality tests.  
 - **Model stability**: Inverse roots of characteristic polynomial (unit circle test).  
 - **Residual diagnostics**: Serial correlation and distribution checks.  
