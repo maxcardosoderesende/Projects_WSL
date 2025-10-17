@@ -23,7 +23,7 @@ langchain>=0.2.5
 langchain-core>=0.2.0
 
 # BACEN API
-bcb>=0.1.7
+python-bcb>=0.1.7
 
 # Web app
 streamlit>=1.36.0
