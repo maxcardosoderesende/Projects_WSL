@@ -12,6 +12,8 @@ __pycache__/
 *.tsv
 *.json
 *.xlsx
+*.png
+
 
 # Presentation files
 *.pptx
@@ -48,6 +50,7 @@ downloads/
 *.txt
 welcome-to-docker/
 Diversos/
+Kaggle/
 courses/
 *.Zone.Identifier
 
