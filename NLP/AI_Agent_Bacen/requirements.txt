@@ -1,0 +1,32 @@
+# Core utilities
+pandas>=2.1.0
+numpy>=1.26.0
+requests>=2.31.0
+tqdm>=4.66.0
+unicodedata2>=15.1.0
+regex>=2023.10.3
+
+# Visualization
+matplotlib>=3.8.0
+plotly>=5.18.0
+
+# Time series & statistics
+scipy>=1.11.3
+statsmodels>=0.14.0
+
+# Similarity & NLP
+sentence-transformers>=3.0.0
+scikit-learn>=1.5.0
+
+# LangChain (optional semantic layer)
+langchain>=0.2.5
+langchain-core>=0.2.0
+
+# BACEN API
+bcb>=0.1.7
+
+# Web app
+streamlit>=1.36.0
+
+# Compatibility
+typing-extensions>=4.9.0
