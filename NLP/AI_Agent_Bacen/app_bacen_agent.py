@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from src.bacen_agent_utils_v2 import (
-    bacen_agent_load_langchain
+    bacen_agent_load_langchain,
     bacen_agent_plot,
     time_series_diagnostics,
     plot_acf_pacf
