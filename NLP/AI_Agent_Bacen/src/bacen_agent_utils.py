@@ -23,6 +23,10 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import adfuller
 from tqdm import trange  # lib for progress bars
 
+
+from openai import OpenAI
+from sklearn.metrics.pairwise import cosine_similarity
+
 warnings.filterwarnings("ignore")
 
 
@@ -189,19 +193,83 @@ def bacen_agent_load(
     return df, best_code
 
 
-def bacen_agent_load_langchain(
+# def bacen_agent_load_langchain(
+#     prompt,
+#     dictionary=BACEN_TOP_SERIES,
+#     start=None,
+#     end=None,
+#     cutoff=0.35,
+#     embedder=None,
+# ):
+#     """
+#     Intelligent BACEN data retriever & analyzer using sentence_transformers embeddings.
+#     1. Uses semantic similarity (SentenceTransformer) to match prompt → BACEN code.
+#     2. Fetches data automatically.
+#     3. Returns df, code, and similarity score.
+#     """
+
+#     if start is None:
+#         start = "2020-01-01"
+
+#     if end is None:
+#         end = pd.Timestamp.now().normalize()
+
+#     if embedder is None:
+#         raise ValueError(
+#             "Embedder not provided. Please pass a SentenceTransformer instance."
+#         )
+
+#     # --- Step 1: Vectorize your BACEN dictionary ( split keys and values) ---
+#     bacen_keys = list(dictionary.keys())
+#     bacen_codes = list(dictionary.values())
+#     bacen_embs = embedder.encode(
+#         bacen_keys, convert_to_numpy=True, normalize_embeddings=True
+#     )
+
+#     # --- Step 2: Semantic search ---
+#     q_emb = embedder.encode([prompt], normalize_embeddings=True)
+#     sims = cosine_similarity(q_emb, bacen_embs)[0]
+#     top_idx = sims.argmax()
+
+#     best_key = bacen_keys[top_idx]
+#     best_code = bacen_codes[top_idx]
+#     best_sim = sims[top_idx]
+
+#     print(
+#         f"Best series selected: '{best_key}' | Code: {best_code} | Similarity: {best_sim:.2f}"
+#     )
+
+#     # --- Step 3: Fetch BACEN data ---
+#     try:
+#         df = sgs.get(best_code, start=start, end=end)
+#         df = df.reset_index().rename(columns={"index": "Date", best_code: "Value"})
+#         print(f"Retrieved {len(df)} rows for code {best_code}.")
+#     except Exception as e:
+#         print(f"❌ Error retrieving series {best_code}: {e}")
+#         return pd.DataFrame(), best_code
+
+#     return df, best_code, best_key, best_sim
+
+
+
+# -------------------------------------------------
+# NEW OpenAI-powered retriever
+# -------------------------------------------------
+def bacen_agent_load_similarity_openai(
     prompt,
     dictionary=BACEN_TOP_SERIES,
     start=None,
     end=None,
     cutoff=0.35,
-    embedder=None,
+    client=None,
+    embedding_model="text-embedding-3-small",
 ):
     """
-    Intelligent BACEN data retriever & analyzer using sentence_transformers embeddings.
-    1. Uses semantic similarity (SentenceTransformer) to match prompt → BACEN code.
-    2. Fetches data automatically.
-    3. Returns df, code, and similarity score.
+    Intelligent BACEN data retriever using OpenAI embeddings.
+
+    1. Uses OpenAI embeddings to compute semantic similarity between user prompt and BACEN dictionary.
+    2. Automatically retrieves data for the best-matched series.
+    3. Returns df, code, best_key, and similarity score.
     """
 
     if start is None:
@@ -210,39 +278,40 @@ def bacen_agent_load_langchain(
     if end is None:
         end = pd.Timestamp.now().normalize()
 
-    if embedder is None:
-        raise ValueError(
-            "Embedder not provided. Please pass a SentenceTransformer instance."
-        )
+    if client is None:
+        client = OpenAI()  # assumes OPENAI_API_KEY in env
 
-    # --- Step 1: Vectorize your BACEN dictionary ( split keys and values) ---
+    # --- Step 1: Vectorize dictionary keys ---
     bacen_keys = list(dictionary.keys())
     bacen_codes = list(dictionary.values())
-    bacen_embs = embedder.encode(
-        bacen_keys, convert_to_numpy=True, normalize_embeddings=True
-    )
 
-    # --- Step 2: Semantic search ---
-    q_emb = embedder.encode([prompt], normalize_embeddings=True)
-    sims = cosine_similarity(q_emb, bacen_embs)[0]
+    # Get embeddings for all BACEN series names
+    bacen_embs = []
+    for i in range(0, len(bacen_keys), 100):  # batch in case you have many
+        batch = bacen_keys[i:i+100]
+        resp = client.embeddings.create(model=embedding_model, input=batch)
+        bacen_embs.extend([e.embedding for e in resp.data])
+
+    # --- Step 2: Get embedding for user query ---
+    q_emb = client.embeddings.create(model=embedding_model, input=[prompt]).data[0].embedding
+
+    # --- Step 3: Compute cosine similarity ---
+    sims = cosine_similarity([q_emb], bacen_embs)[0]
     top_idx = sims.argmax()
-
     best_key = bacen_keys[top_idx]
     best_code = bacen_codes[top_idx]
     best_sim = sims[top_idx]
 
-    print(
-        f"Best series selected: '{best_key}' | Code: {best_code} | Similarity: {best_sim:.2f}"
-    )
+    print(f"✅ Best match: '{best_key}' (Code {best_code}) | Similarity: {best_sim:.2f}")
 
-    # --- Step 3: Fetch BACEN data ---
+    # --- Step 4: Fetch BACEN data ---
     try:
         df = sgs.get(best_code, start=start, end=end)
         df = df.reset_index().rename(columns={"index": "Date", best_code: "Value"})
-        print(f"Retrieved {len(df)} rows for code {best_code}.")
+        print(f"📈 Retrieved {len(df)} rows for code {best_code}.")
     except Exception as e:
         print(f"❌ Error retrieving series {best_code}: {e}")
-        return pd.DataFrame(), best_code
+        return pd.DataFrame(), best_code, best_key, best_sim
 
     return df, best_code, best_key, best_sim
 

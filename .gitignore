@@ -51,6 +51,7 @@ Diversos/
 courses/
 Kaggle/
 *.Zone.Identifier
+*.env
 
 # Windows ADS / odd colon-suffixed files
 /files.zip:Zone.Identifier
