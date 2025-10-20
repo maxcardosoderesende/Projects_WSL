@@ -1,18 +1,41 @@
-
 # AI BACEN Agent SGS Time Series Web App
-
-import streamlit as st
-import pandas as pd
+import warnings
 from datetime import datetime
-from src.bacen_agent_utils import (
-    bacen_agent_load_langchain,
-    bacen_agent_plot,
-    time_series_diagnostics,
-    plot_acf_pacf
+
+import pandas as pd
+import streamlit as st
+from sentence_transformers import SentenceTransformer
+
+from src.bacen_agent_utils import (bacen_agent_load_langchain,
+                                   bacen_agent_plot_full,
+                                   bacen_agent_plot_series, plot_acf_pacf,
+                                   time_series_diagnostics)
+
+warnings.filterwarnings("ignore")
+
+
+@st.cache_resource(show_spinner="Loading SentenceTransformer model...")
+def load_embedder():
+    return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+
+
+embedder = load_embedder()
+
+
+# Custom CSS
+st.markdown(
+    """
+    <style>
+        .dashed-line {
+            border-top: 2px dashed #1E90FF; /* blue line */
+            margin-top: 6px;   /* closer to the subheader */
+            margin-bottom: 12px; /* small space before content */
+        }
+    </style>
+""",
+    unsafe_allow_html=True,
 )
 
-import warnings
-warnings.filterwarnings("ignore")
 
 # -------------------------------
 #  Streamlit UI
@@ -30,21 +53,26 @@ st.markdown(
     """
 )
 
+
 # Prompt input
 prompt = st.text_input("🗣️ Enter your prompt:", placeholder="e.g., saldo poupanca SBPE")
+
 
 # Date range
 col1, col2 = st.columns(2)
 start_date = col1.date_input("Start date", datetime(2018, 1, 1))
 end_date = col2.date_input("End date", datetime.today())
 
-# Run button
+
+# Run text
 if st.button("🔍 Run Analysis"):
     if not prompt.strip():
         st.warning("Please enter a prompt")
     else:
         with st.spinner("Querying BACEN API..."):
-            df, code, best_key, sim  = bacen_agent_load_langchain(prompt, start=start_date)
+            df, code, best_key, sim = bacen_agent_load_langchain(
+                prompt, start=start_date, embedder=embedder
+            )
 
         if df.empty:
             st.error("⚠️ No results found for that prompt.")
@@ -52,24 +80,63 @@ if st.button("🔍 Run Analysis"):
             st.success(f"Retrieved {len(df)} rows for code {code}")
 
             # Display data preview
-            # vst.dataframe(df.head())
-
-            # Plot
-            fig = bacen_agent_plot(df, code, prompt)
-            if fig:
-                st.pyplot(fig, width='stretch')
-
-            # Time-series diagnostics differenced data
-            st.subheader("📊 Time-series diagnostics - Differenced data")
-            diag = time_series_diagnostics(df, use_returns=True, lags=12, title=f"BACEN Series {code}")
-            st.dataframe(diag)
-
+            st.markdown('<div class="dashed-line"></div>', unsafe_allow_html=True)
+            st.subheader("Summary Statistics (Raw Series)")
             col1, col2 = st.columns(2)
-
             with col1:
-                fig1 = plot_acf_pacf(df, lags=24, use_returns=False, title=f"BACEN Series {code}")
-                st.pyplot(fig1, use_container_width=True, bbox_inches="tight")
+                fig1 = bacen_agent_plot_series(df, code, use_returns=False)
+                st.pyplot(fig1, width="stretch", bbox_inches="tight")
 
             with col2:
-                fig2 = plot_acf_pacf(df, lags=24, use_returns=True, title=f"BACEN Series {code}")
-                st.pyplot(fig2, use_container_width=True, bbox_inches="tight")
+                tab_raw = time_series_diagnostics(df, lags=12, use_returns=False)
+                selected_rows = tab_raw[
+                    tab_raw["Statistic"].isin(
+                        [
+                            "Mean",
+                            "Standard deviation",
+                            "Skewness",
+                            "Kurtosis",
+                            "Jarque-Bera (p)",
+                            "ADF (p)",
+                        ]
+                    )
+                ]
+                st.dataframe(selected_rows, width="stretch", hide_index=True)
+
+            st.markdown('<div class="dashed-line"></div>', unsafe_allow_html=True)
+            st.subheader("Summary Statistics (Diff Series)")
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_diff = bacen_agent_plot_series(df, code, use_returns=True)
+                st.pyplot(fig_diff, width="stretch", bbox_inches="tight")
+
+            with col2:
+                tab_diff = time_series_diagnostics(df, lags=12, use_returns=True)
+                selected_rows = tab_diff[
+                    tab_diff["Statistic"].isin(
+                        [
+                            "Mean",
+                            "Standard deviation",
+                            "Skewness",
+                            "Kurtosis",
+                            "Jarque-Bera (p)",
+                            "ADF (p)",
+                            "Ljung-Box Q-test (p)",
+                            "ARCH test (p)",
+                        ]
+                    )
+                ]
+                st.dataframe(selected_rows, width="stretch", hide_index=True)
+
+            st.markdown('<div class="dashed-line"></div>', unsafe_allow_html=True)
+            st.subheader("Lag Definitions - ACF and PACF plots")
+
+            fig3 = plot_acf_pacf(
+                df, lags=24, use_returns=False, title=f"BACEN Series {code}"
+            )
+            st.pyplot(fig3, width="stretch", bbox_inches="tight")
+
+            fig4 = plot_acf_pacf(
+                df, lags=24, use_returns=True, title=f"BACEN Series {code}"
+            )
+            st.pyplot(fig4, width="stretch", bbox_inches="tight")

@@ -1,37 +1,28 @@
-# BACEN AI Agent - Time seires analysis functions
-
-import requests # access HTTP content
-from requests.adapters import HTTPAdapter, Retry
-import pandas as pd # lib for data manipulation
-
-from tqdm import trange # lib for progress bars
-
-import unicodedata
-from bcb import sgs
-import re
+# BACEN AI Agent -  source functions
 
 # Similarity
 import difflib
+import re
+import unicodedata
+import warnings
 from difflib import SequenceMatcher
 
+import matplotlib.pyplot as plt
+import pandas as pd  # lib for data manipulation
+import requests  # access HTTP content
+from bcb import sgs
+from requests.adapters import HTTPAdapter, Retry
+## Timne-series diagnostics tests
+from scipy import stats
 ## langChain
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-
-
-import matplotlib.pyplot as plt
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
-
-## Timne-series diagnostics tests
-from scipy import stats
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import adfuller
-from statsmodels.stats.diagnostic import het_arch, acorr_ljungbox
-from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from tqdm import trange  # lib for progress bars
 
-import warnings
 warnings.filterwarnings("ignore")
 
 
@@ -39,7 +30,6 @@ BACEN_TOP_SERIES = {
     # 🔹 External sector
     "reservas internacionais total diária": 13621,
     "transações correntes mensal saldo": 22701,
-
     # 🔹 Interest rates
     "taxa selic meta definida pelo copom": 432,
     "taxa selic acumulada no mês": 4390,
@@ -47,7 +37,6 @@ BACEN_TOP_SERIES = {
     "taxa básica financeira tbf": 253,
     "taxa referencial tr": 226,
     "taxa selic diária": 11,
-
     # 🔹 Credit and savings
     "Saldo diário de depósitos de poupança - SBPE": 239,
     # "Taxa média de depósitos de poupança (rentabilidade)": 195,
@@ -55,13 +44,11 @@ BACEN_TOP_SERIES = {
     "taxa média de juros pessoas jurídicas total": 20715,
     "taxa média de juros total": 20714,
     "indicador de custo do crédito icc": 25359,
-
     # 🔹 Inflation indices (CPI)
     "Índice nacional de preços ao consumidor-amplo (IPCA)": 433,
     "Índice nacional de preços ao consumidor-Amplo (IPCA) - Núcleo médias aparadas com suavização": 4466,
     "ipca 15 índice nacional de preços ao consumidor amplo 15": 11428,
     "inpc índice nacional de preços ao consumidor": 188,
-
     # 🔹 Monetary aggregates
     "base monetária ampliada títulos do tesouro nacional carteira do mercado": 1831,
     "base monetária ampliada títulos do tesouro nacional financiamento líquido": 1832,
@@ -69,16 +56,13 @@ BACEN_TOP_SERIES = {
     "meios de pagamento ampliados títulos federais em poder do público selic": 1841,
     "dívida mobiliária participação por indexador posição de custódia": 2238,
     "dívida mobiliária participação por indexador posição em carteira": 4177,
-
     # 🔹 GDP and Activity
     "pib produto interno bruto trimestral": 4380,
     "pib nominal preço de mercado trimestral": 4382,
     "ibc br índice de atividade econômica do banco central mensal dessazonalizado": 24364,
     "ibc br índice de atividade econômica do banco central mensal original": 24363,
-
     # 🔹 Inflation expectations (Focus survey)
     "expectativa ipca 12 meses focus média": 4333,
-
     # 🔹 Exchange rates
     "câmbio comercial venda r$/us$ média": 10813,
     "câmbio efetivo real índice jan 2005 = 100": 11752,
@@ -100,16 +84,15 @@ def normalize_text(text):
     text = text.lower().strip()
 
     # Remove accents (normalize to NFD and strip combining marks)
-    text = ''.join(
-        c for c in unicodedata.normalize('NFD', text)
-        if unicodedata.category(c) != 'Mn'
+    text = "".join(
+        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
     )
 
     # Remove punctuation, symbols, and non-alphanumeric chars (keep spaces)
-    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
 
     # Collapse multiple spaces
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
 
     return text
 
@@ -145,10 +128,16 @@ def find_bacen_code(prompt, dictionary=BACEN_TOP_SERIES, cutoff=0.3, verbose=Tru
     return None
 
 
-def bacen_agent_load(prompt, dictionary=BACEN_TOP_SERIES, start=None, end=pd.Timestamp.now().normalize(), cutoff=0.3):
+def bacen_agent_load(
+    prompt,
+    dictionary=BACEN_TOP_SERIES,
+    start=None,
+    end=pd.Timestamp.now().normalize(),
+    cutoff=0.3,
+):
     """
     Understands the prompt, finds the right BACEN code using difflib methodology,
-    lists all possible similar matches, 
+    lists all possible similar matches,
     and loads the data for the best match (highest similarity score).
     """
     print(f"\nProcessing prompt: '{prompt}'")
@@ -163,8 +152,7 @@ def bacen_agent_load(prompt, dictionary=BACEN_TOP_SERIES, start=None, end=pd.Tim
 
     # --- Filter dictionary to keys that contain any query token ---
     filtered_items = {
-        k: v for k, v in normalized_dict.items()
-        if any(tok in k for tok in tokens)
+        k: v for k, v in normalized_dict.items() if any(tok in k for tok in tokens)
     }
 
     if not filtered_items:
@@ -190,7 +178,9 @@ def bacen_agent_load(prompt, dictionary=BACEN_TOP_SERIES, start=None, end=pd.Tim
         print(f"  • {key:<80} → code {code:<6} (similarity={sim:.2f})")
 
     best_key, best_code, best_sim = scored[0]
-    print(f"\n✅ Best match selected: '{best_key}' → code {best_code} (similarity={best_sim:.2f})")
+    print(
+        f"\nBest match selected: '{best_key}' → code {best_code} (similarity={best_sim:.2f})"
+    )
 
     # --- Fetch data ---
     df = sgs.get(best_code, start=start, end=end)  # use numeric directly
@@ -199,24 +189,38 @@ def bacen_agent_load(prompt, dictionary=BACEN_TOP_SERIES, start=None, end=pd.Tim
     return df, best_code
 
 
-def bacen_agent_load_langchain(prompt, dictionary=BACEN_TOP_SERIES, start=None, end=None, cutoff=0.35):
+def bacen_agent_load_langchain(
+    prompt,
+    dictionary=BACEN_TOP_SERIES,
+    start=None,
+    end=None,
+    cutoff=0.35,
+    embedder=None,
+):
     """
-    Intelligent BACEN data retriever & analyzer using LangChain embeddings.
+    Intelligent BACEN data retriever & analyzer using sentence_transformers embeddings.
     1. Uses semantic similarity (SentenceTransformer) to match prompt → BACEN code.
     2. Fetches data automatically.
     3. Returns df, code, and similarity score.
     """
 
     if start is None:
-        start="2020-01-01"
+        start = "2020-01-01"
 
     if end is None:
         end = pd.Timestamp.now().normalize()
 
+    if embedder is None:
+        raise ValueError(
+            "Embedder not provided. Please pass a SentenceTransformer instance."
+        )
+
     # --- Step 1: Vectorize your BACEN dictionary ( split keys and values) ---
     bacen_keys = list(dictionary.keys())
     bacen_codes = list(dictionary.values())
-    bacen_embs = embedder.encode(bacen_keys, convert_to_numpy=True, normalize_embeddings=True)
+    bacen_embs = embedder.encode(
+        bacen_keys, convert_to_numpy=True, normalize_embeddings=True
+    )
 
     # --- Step 2: Semantic search ---
     q_emb = embedder.encode([prompt], normalize_embeddings=True)
@@ -227,7 +231,9 @@ def bacen_agent_load_langchain(prompt, dictionary=BACEN_TOP_SERIES, start=None, 
     best_code = bacen_codes[top_idx]
     best_sim = sims[top_idx]
 
-    print(f"Best series selected: '{best_key}' | Code: {best_code} | Similarity: {best_sim:.2f}")
+    print(
+        f"Best series selected: '{best_key}' | Code: {best_code} | Similarity: {best_sim:.2f}"
+    )
 
     # --- Step 3: Fetch BACEN data ---
     try:
@@ -241,8 +247,34 @@ def bacen_agent_load_langchain(prompt, dictionary=BACEN_TOP_SERIES, start=None, 
     return df, best_code, best_key, best_sim
 
 
+def bacen_agent_plot_series(df, code, use_returns=False):
+    """Time-series plot."""
 
-def bacen_agent_plot(df, code):
+    if "Value" not in df.columns:
+        df = df.rename(columns={df.columns[-1]: "Value"})
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+
+    if use_returns:
+        series = df["Value"].pct_change() * 100
+        series = series.dropna()
+        label = "Returns – Percentage (Δy/yₜ₋₁ * 100)"
+    else:
+        series = df["Value"]
+        label = "Levels – Raw Series"
+
+    # --- Plot ---
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(series, color="tab:blue", linewidth=1.5)
+    plt.title(f" BACEN Time Series {code} – {label}", fontsize=12, fontweight="bold")
+    plt.grid(True, linestyle="--", alpha=0.5)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+    return fig
+
+
+def bacen_agent_plot_full(df, code):
     """
     Fetch, analyze, and plot BACEN series using LangChain-based semantic matching
     """
@@ -274,7 +306,9 @@ def bacen_agent_plot(df, code):
         df_resampled = df["Value"].copy()
         period = None
 
-    print(f"Detected {freq_type} data → using resampled freq = {df_resampled.index.freqstr or 'W/M'}")
+    print(
+        f"Detected {freq_type} data → using resampled freq = {df_resampled.index.freqstr or 'W/M'}"
+    )
 
     # --- Plot layout ---
     fig, axes = plt.subplots(2, 2, figsize=(13, 7))
@@ -288,7 +322,9 @@ def bacen_agent_plot(df, code):
     axes[0, 1].set_title("Returns (Δyₜ / yₜ₋₁)")
 
     try:
-        result = seasonal_decompose(df_resampled.dropna(), model="additive", period=period)
+        result = seasonal_decompose(
+            df_resampled.dropna(), model="additive", period=period
+        )
         axes[1, 0].plot(result.trend, color="tab:green")
         axes[1, 0].set_title("Trend")
         axes[1, 1].plot(result.seasonal, color="tab:purple")
@@ -303,7 +339,7 @@ def bacen_agent_plot(df, code):
     return fig
 
 
-def time_series_diagnostics(df, lags=12, use_returns=False, title="Time-Series Diagnostics"):
+def time_series_diagnostics(df, lags=12, use_returns=False):
     """
     Compute descriptive and diagnostic statistics for a BACEN time series DataFrame.
     Tests: Descriptive stats, ADF, Ljung-Box (Q and Q²), ARCH LM.
@@ -357,12 +393,12 @@ def time_series_diagnostics(df, lags=12, use_returns=False, title="Time-Series D
 
     # --- Autocorrelation (Ljung-Box) ---
     lb_results = acorr_ljungbox(df, lags=[12], return_df=True)
-    lbq_p = lb_results['lb_pvalue'].values[0]
+    lbq_p = lb_results["lb_pvalue"].values[0]
 
     # # --- Ljung-Box on squared series (heteroskedasticity) ---
     lb2_results = acorr_ljungbox(df**2, lags=[lags], return_df=False)
     # lbq2_stat = lb2_results['lb_stat'].values[0]
-    lbq2_p = lb2_results['lb_pvalue'].values[0]
+    lbq2_p = lb2_results["lb_pvalue"].values[0]
 
     # --- ARCH LM test ---
     arch_results = het_arch(series)
@@ -370,42 +406,43 @@ def time_series_diagnostics(df, lags=12, use_returns=False, title="Time-Series D
     arch_p = arch_results[1]
 
     # --- Summary Table ---
-    df_diag = pd.DataFrame({
-        "Statistic": [
-            "Number of observations", 
-            "Mean", 
-            "Standard deviation",
-            "Skewness", 
-            "Kurtosis", 
-            "Jarque-Bera (p)",
-            "ADF (p)",
-            "Ljung-Box Q-test (p)", 
-            "Ljung-Box Q²-test (p)", 
-            "ARCH test (p)"
-        ],
-        "Value": [
-            n,
-            round(mean,4),
-            round(std,4),
-            round(skew,4),
-            round(kurt,4),
-            round(jb_p,4),
-            round(adf_p,4),
-            round(lbq_p,4),
-            round(lbq2_p,4),
-            round(arch_p,4)
-        ]
-    })
+    df_diag = pd.DataFrame(
+        {
+            "Statistic": [
+                "Number of observations",
+                "Mean",
+                "Standard deviation",
+                "Skewness",
+                "Kurtosis",
+                "Jarque-Bera (p)",
+                "ADF (p)",
+                "Ljung-Box Q-test (p)",
+                "Ljung-Box Q²-test (p)",
+                "ARCH test (p)",
+            ],
+            "Value": [
+                n,
+                round(mean, 4),
+                round(std, 4),
+                round(skew, 4),
+                round(kurt, 4),
+                round(jb_p, 4),
+                round(adf_p, 4),
+                round(lbq_p, 4),
+                round(lbq2_p, 4),
+                round(arch_p, 4),
+            ],
+        }
+    )
 
     return df_diag
-
 
 
 def plot_acf_pacf(df, lags=24, use_returns=False, title="ACF/PACF Diagnostics"):
     """Plot ACF and PACF for BACEN series (levels and/or returns)."""
     if "Value" not in df.columns:
         df = df.rename(columns={df.columns[-1]: "Value"})
-    
+
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.set_index("Date").sort_index()
 
@@ -431,16 +468,18 @@ def plot_acf_pacf(df, lags=24, use_returns=False, title="ACF/PACF Diagnostics"):
     return fig
 
 
-def bacen_agent_final(prompt, dictionary=BACEN_TOP_SERIES, start=None, end=pd.Timestamp.now().normalize(), plot=True):
+def bacen_agent_final(
+    prompt,
+    dictionary=BACEN_TOP_SERIES,
+    start=None,
+    end=pd.Timestamp.now().normalize(),
+    plot=True,
+):
     df, code = bacen_agent_load(prompt, dictionary, start, end)
     if df is None or df.empty:
         return None
 
     if plot:
-        bacen_agent_plot(df, code, prompt)
+        bacen_agent_plot_full(df, code, prompt)
 
     return df
-
-
-
-
