@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 
 import matplotlib.pyplot as plt
 import pandas as pd  # lib for data manipulation
+import numpy as np
 import requests  # access HTTP content
 from bcb import sgs
 from requests.adapters import HTTPAdapter, Retry
@@ -18,9 +19,11 @@ from scipy import stats
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.tsa.stattools import acf, pacf
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.holtwinters import SimpleExpSmoothing, ExponentialSmoothing
 from tqdm import trange  # lib for progress bars
 
 
@@ -61,7 +64,8 @@ BACEN_TOP_SERIES = {
     "dívida mobiliária participação por indexador posição de custódia": 2238,
     "dívida mobiliária participação por indexador posição em carteira": 4177,
     # 🔹 GDP and Activity
-    "pib produto interno bruto trimestral": 4380,
+    "PIB mensal - Valores correntes em reais": 4380,
+    "PIB mensal - Em dólares US$ milhões":  4385,
     "pib nominal preço de mercado trimestral": 4382,
     "ibc br índice de atividade econômica do banco central mensal dessazonalizado": 24364,
     "ibc br índice de atividade econômica do banco central mensal original": 24363,
@@ -507,8 +511,43 @@ def time_series_diagnostics(df, lags=12, use_returns=False):
     return df_diag
 
 
+# def plot_acf_pacf(df, lags=24, use_returns=False, title="ACF/PACF Diagnostics"):
+#     """Plot ACF and PACF for BACEN series (levels and/or returns)."""
+#     if "Value" not in df.columns:
+#         df = df.rename(columns={df.columns[-1]: "Value"})
+
+#     df["Date"] = pd.to_datetime(df["Date"])
+#     df = df.set_index("Date").sort_index()
+
+#     if use_returns:
+#         series = df["Value"].pct_change() * 100
+#         series = series.dropna()
+#         label = "Returns – Percentage (Δy/yₜ₋₁ * 100)"
+#     else:
+#         series = df["Value"]
+#         label = "Levels – Raw Series"
+
+#     # --- Plot ---
+#     fig, axes = plt.subplots(1, 2, figsize=(12, 3))
+#     fig.suptitle(f"{title} – {label}", fontsize=12, fontweight="bold")
+
+#     plot_acf(series, ax=axes[0], lags=lags, alpha=0.05)
+#     axes[0].set_title("ACF")
+
+#     plot_pacf(series, ax=axes[1], lags=lags, alpha=0.05, method="ywm")
+#     axes[1].set_title("PACF")
+
+#     plt.tight_layout(rect=[0, 0, 1, 0.99])
+#     return fig
+
+
 def plot_acf_pacf(df, lags=24, use_returns=False, title="ACF/PACF Diagnostics"):
-    """Plot ACF and PACF for BACEN series (levels and/or returns)."""
+    """
+    Plot ACF and PACF for BACEN series (levels or returns),
+    and return both the figure and diagnostic metrics.
+    """
+
+    # --- Prepare series ---
     if "Value" not in df.columns:
         df = df.rename(columns={df.columns[-1]: "Value"})
 
@@ -523,6 +562,16 @@ def plot_acf_pacf(df, lags=24, use_returns=False, title="ACF/PACF Diagnostics"):
         series = df["Value"]
         label = "Levels – Raw Series"
 
+    # --- Compute ACF/PACF ---
+    acf_vals = acf(series, nlags=lags, fft=False)
+    pacf_vals = pacf(series, nlags=lags, method="ywm")
+
+    # --- Statistical significance threshold ---
+    n = len(series)
+    conf = 2 / np.sqrt(n)  # approx 95% confidence band
+    sig_lags_acf = [i for i, v in enumerate(acf_vals) if abs(v) > conf]
+    sig_lags_pacf = [i for i, v in enumerate(pacf_vals) if abs(v) > conf]
+
     # --- Plot ---
     fig, axes = plt.subplots(1, 2, figsize=(12, 3))
     fig.suptitle(f"{title} – {label}", fontsize=12, fontweight="bold")
@@ -533,8 +582,20 @@ def plot_acf_pacf(df, lags=24, use_returns=False, title="ACF/PACF Diagnostics"):
     plot_pacf(series, ax=axes[1], lags=lags, alpha=0.05, method="ywm")
     axes[1].set_title("PACF")
 
-    plt.tight_layout(rect=[0, 0, 1, 0.99])
-    return fig
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    # --- Diagnostic summary ---
+    metrics = {
+        "label": label,
+        "n_obs": n,
+        "acf_vals": acf_vals.tolist(),
+        "pacf_vals": pacf_vals.tolist(),
+        "significant_acf_lags": sig_lags_acf,
+        "significant_pacf_lags": sig_lags_pacf,
+    }
+
+    return fig, metrics
+
 
 
 def bacen_agent_final(
@@ -552,3 +613,115 @@ def bacen_agent_final(
         bacen_agent_plot_full(df, code, prompt)
 
     return df
+
+
+
+def baseline_forecast(
+    df,
+    model_type="single",
+    alpha=None,
+    beta=None,
+    gamma=None,
+    season_periods=None,
+    test_size=0.2,
+    steps_ahead=2
+):
+    """
+    Rolling baseline forecast with exponential smoothing variants.
+
+    - Performs 80/20 train/test split
+    - Generates walk-forward predictions over test window
+    - Returns full fitted model for 2-step out-of-sample forecast
+    """
+
+    # --- Prepare series ---
+    df = df.copy()
+
+    if "Value" not in df.columns:
+        df = df.rename(columns={df.columns[-1]: "Value"})
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+
+    y = df["Value"].dropna()
+
+    # --- Split train/test --- 80/20
+    split_idx = int(len(y) * (1 - test_size))
+    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+
+    preds = []
+    test_dates = y_test.index
+
+    # --- Walk-forward loop ---
+    for t in range(len(y_test)):
+        y_window = pd.concat([y_train, y_test.iloc[:t]])
+        
+        if model_type == "single":
+            model = SimpleExpSmoothing(y_window)
+            fit = model.fit(smoothing_level=alpha, optimized=(alpha is None))
+
+        elif model_type == "double":
+            model = ExponentialSmoothing(y_window, trend="add", seasonal=None)
+            fit = model.fit(smoothing_level=alpha, smoothing_trend=beta, optimized=(alpha is None or beta is None))
+
+        elif model_type == "holtwinters":
+            if season_periods is None:
+                raise ValueError("season_periods must be provided for Holt-Winters model.")
+            model = ExponentialSmoothing(y_window, trend="add", seasonal="add", seasonal_periods=season_periods)
+            fit = model.fit(
+                smoothing_level=alpha,
+                smoothing_trend=beta,
+                smoothing_seasonal=gamma,
+                optimized=(alpha is None or beta is None or gamma is None)
+            )
+        else:
+            raise ValueError("Invalid model_type. Choose from 'single', 'double', or 'holtwinters'.")
+
+        pred = fit.forecast(1).iloc[0]
+        preds.append(pred)
+
+    # --- Rolling results ---
+    rolling_forecast = pd.Series(preds, index=test_dates, name="RollingForecast")
+
+    # --- Refit model on full sample for final horizon forecast ---
+    if model_type == "single":
+        final_model = SimpleExpSmoothing(y).fit(smoothing_level=alpha, optimized=(alpha is None))
+    elif model_type == "double":
+        final_model = ExponentialSmoothing(y, trend="add").fit(
+            smoothing_level=alpha, smoothing_trend=beta, optimized=(alpha is None or beta is None)
+        )
+    else:
+        final_model = ExponentialSmoothing(y, trend="add", seasonal="add", seasonal_periods=season_periods).fit(
+            smoothing_level=alpha, smoothing_trend=beta, smoothing_seasonal=gamma,
+            optimized=(alpha is None or beta is None or gamma is None)
+        )
+
+    fitted = final_model.fittedvalues
+    forecast_out = final_model.forecast(steps_ahead)
+
+    # --- Error metrics ---
+    mape = np.mean(np.abs((y_test - rolling_forecast) / y_test)) * 100
+    rmse = np.sqrt(np.mean((y_test - rolling_forecast) ** 2))
+
+    # --- Debug info ---
+    print("Columns inside function:", df.columns.tolist())
+    print("Returning fitted index:", fitted.index[-3:], "→ Forecast index:", forecast_out.index)
+    print("Out-of-sample forecasts:")
+    print(forecast_out.tail(3))
+
+    # --- Return all useful info ---
+    result = {
+        "train_size": len(y_train),
+        "test_size": len(y_test),
+        "rolling_forecast": rolling_forecast,
+        "fitted_values": fitted,
+        "forecast_out": forecast_out,
+        "mape": mape,
+        "rmse": rmse,
+        "df_processed": df,  # 👈 Return the internally renamed dataframe for plotting
+        "model_summary": final_model.summary() if hasattr(final_model, "summary") else str(final_model.params),
+    }
+
+    return result
+
+
