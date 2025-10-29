@@ -31,7 +31,7 @@ Built with **Python + Streamlit**, this project automates the full time-series w
 
 Obs: Deployed both locally and on AWS (SageMaker + EC2), this framework showcases the next generation of AI-assisted time-series modeling.
 
-## 🧠 AI Agent Logic
+## AI Agent Logic
 
 It:
 - Interprets statistical diagnostics  

@@ -5,18 +5,23 @@ from datetime import datetime
 import os
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 import plotly.express as px 
+import plotly.graph_objects as go
 from dotenv import load_dotenv
 from openai import OpenAI
+import seaborn as sns
 
 from src.bacen_agent_utils import (
     bacen_agent_load_similarity_openai,
-    bacen_agent_plot_full,
     bacen_agent_plot_series,
     plot_acf_pacf,
     time_series_diagnostics,
-    baseline_forecast
+    plot_residual_diagnostics,
+    baseline_forecast,
+    prophet_forecast_standard,
+    prophet_forecast_standard_expanding_window
 )
 
 warnings.filterwarnings("ignore")
@@ -35,9 +40,12 @@ client = load_openai_client()
 # -------------------------------------------------
 # Session State Initialization
 # -------------------------------------------------
-for key in ["df", "code", "tab_raw", "tab_diff", "ai_text_raw", "ai_text_diff", "ai_text_lags"]:
+for key in ["df", "code", "tab_raw", "tab_diff", "ai_text_raw", "ai_text_diff", "ai_text_lags",
+             "baseline_result", "prophet_result_mean", "prophet_result_traditional", 'prophet_result_window']:
     if key not in st.session_state:
         st.session_state[key] = None
+
+
 
 # -------------------------------------------------
 # OpenAI prompt generator
@@ -116,12 +124,13 @@ if st.button("🔍 Run Analysis", width="stretch"):
         if df is None or df.empty:
             st.error("⚠️ No results found for that prompt.")
         else:
-            st.success(f"Retrieved {len(df)} rows for code {code}")
+            st.success(f"Retrieved {len(df)} rows for code {code} | {best_key} ")
             st.session_state.df = df
             st.session_state.code = code
             st.session_state.tab_raw = time_series_diagnostics(df, lags=12, use_returns=False)
             st.session_state.ai_text_raw = None
             st.session_state.ai_text_diff = None
+
 
 # -------------------------------------------------
 # DISPLAY SECTION (persists after rerun)
@@ -282,48 +291,376 @@ if st.session_state.df is not None:
     if st.session_state.ai_text_lags:
         st.info(st.session_state.ai_text_lags)
 
-    # -------------------------------------------------
-    st.markdown('<div class="dashed-line"></div>', unsafe_allow_html=True)
-    st.subheader("Compute Baseline  Predictions/Forecasting ")
+
+# -------------------------------------------------------------------
+# FORECASTING SESSION
+# -------------------------------------------------------------------
+st.markdown('<div class="dashed-line"></div>', unsafe_allow_html=True)
+st.subheader("Forecasting Models")
+
+if st.session_state.df is not None:
+    df = st.session_state.df
+
+# === Two-column layout ===
+col1, col2, col3 = st.columns(3)
+
+# -------------------------------------------------------------------
+# BASELINE MODEL (EXPONENTIAL SMOOTHING)
+# -------------------------------------------------------------------
+with col1:
+    st.markdown("#### BASELINE: Exponential Smoothing")
 
     model_type = st.selectbox(
-        "Select baseline model type:",
+        "Select model type:",
         ["single", "double", "holtwinters"],
+        index=1,
         format_func=lambda x: x.title()
     )
 
-    col1, col2, col3 = st.columns(3)
-    alpha = col1.number_input("α (level smoothing)", 0.0, 1.0, value=0.3)
-    beta = col2.number_input("β (trend smoothing)", 0.0, 1.0, value=0.1)
-    gamma = col3.number_input("γ (seasonal smoothing)", 0.0, 1.0, value=0.1)
+    c1, c2, c3, c4 = st.columns(4)
+    # single -> Data is relatively stable with no trend or repeating pattern
+    # α close to 1 → reacts quickly to recent changes.
+    alpha = c1.number_input("α (level)", 0.0, 1.0, 0.3, 0.05)
+    # Doble -> Level + Trend -> Data has a consistent upward or downward trend but no seasonality
+    # Adds a trend term that evolves over time.
+    beta = c2.number_input("β (trend)", 0.0, 1.0, 0.1, 0.05)
+    # Hot Winters -> Data has both a trend and repeating seasonal patterns (e.g. weekly, monthly)
+    # α (level), β (trend), γ (seasonal), and season_periods (e.g. 12 for months)
+    gamma = c3.number_input("γ (seasonal)", 0.0, 1.0, 0.1, 0.05)
+    season_periods = c4.number_input("Seasonal period", 1, 52, 12)
+    # steps_ahead_base = c5.number_input("Forecast horizon (steps ahead)", 1, 12, n)
+    steps_ahead = 30
 
-    steps_ahead = st.number_input("Forecast horizon (steps ahead)", 1, 12, value=2)
-    season_periods = st.number_input("Seasonal period (Only holtwinters)", 1, 52, value=12)
+    if st.button("🚀 Run Baseline Forecast", use_container_width=True):
+        with st.spinner("Running Baseline Forecast..."):
+            try:
+                result_baseline = baseline_forecast(
+                    df,
+                    model_type=model_type,
+                    alpha=alpha,
+                    beta=beta,
+                    gamma=gamma,
+                    season_periods=season_periods,
+                    steps_ahead = steps_ahead
+                )
+                # ✅ Persist results
+                st.session_state.baseline_result = result_baseline
 
-    if st.button("🚀 Run Forecast (Rolling Evaluation)", use_container_width=True):
-        # Run model
-        result = baseline_forecast(df, model_type="double", alpha=0.3, beta=0.1, steps_ahead=2)
+            except Exception as e:
+                st.error(f"⚠️ Error in baseline forecast: {e}")
 
-        # Combine actuals + forecasts
+    # ✅ Show previous results (if exist)
+    if st.session_state.baseline_result is not None:
+        result = st.session_state.baseline_result
         df_proc = result["df_processed"]
-        combined = pd.concat(
-            [
-                df_proc[["Value"]].rename(columns={"Value": "Actual"}),
-                result["rolling_forecast"].rename("Forecast")
-            ],
-            axis=1
+
+        # ---- Chart ----
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df_proc.index, y=df_proc["Value"],
+                                 mode="lines", name="Actual", line=dict(color="lightblue", width=2)))
+        fig.add_trace(go.Scatter(x=result["rolling_forecast"].index, y=result["rolling_forecast"],
+                                 mode="lines", name="Forecast (rolling)",
+                                 line=dict(color="orange", dash="dot", width=2)))
+        fig.add_trace(go.Scatter(x=result["forecast_out"]["Date"],y=result["forecast_out"]["Forecast"],
+                                mode="lines", name="Forecast (Future)",
+                                line=dict(color="green", dash="dot", width=2)))
+        fig.update_layout(
+            title=f"<b>{model_type.title()} Rolling Forecast</b><br>"
+                  f"MAPE: {result['mape']:.2f}% | RMSE: {result['rmse']:.2f}",
+            xaxis_title="Date",
+            yaxis_title="Value",
+            legend=dict(x=0.01, y=0.99),
+            template="plotly_white",
         )
-        print(combined)
-        fig = px.line(
-            combined,
-            x=combined.index,
-            y=["Actual", "Forecast"],
-            title=f"Rolling Forecast vs Actuals — MAPE: {result['mape']:.2f}% | RMSE: {result['rmse']:.2f}",
-            markers=True
-        )
-        fig.update_layout(legend_title_text="Series")
+
         st.plotly_chart(fig, use_container_width=True)
 
-        # Display next 2-period forecast
-        st.write("**Next 2-step Forecast:**")
-        st.dataframe(result["forecast_out"])
+        st.markdown("#### Next Forecasts")
+        # --- Format the next forecast dataframe safely ---
+
+        forecast_out = result["forecast_out"].copy()
+        forecast_out["Date"] = pd.to_datetime(forecast_out["Date"]).dt.strftime("%Y-%m-%d")
+        forecast_out["Forecast"] = forecast_out["Forecast"].astype(float)
+
+        st.dataframe(forecast_out.style.format({"Forecast": "{:,.2f}"}),
+                     width='stretch', hide_index=True)
+
+
+        st.markdown('#### Error Diagnostics')
+        residuals = result["residuals"]
+        fig_resid = plot_residual_diagnostics(residuals)
+        st.pyplot(fig_resid, width='stretch')
+
+# -------------------------------------------------------------------
+# PROPHET MODEL Traditional (non-rolling)
+# -------------------------------------------------------------------
+
+with col2:
+    st.markdown("#### Prophet Forecasting - Traditional")
+
+    seasonality_type_std = st.selectbox(
+        "Select seasonality type:",
+        ["None", "additive", "multiplicative"],
+        index=1,
+        format_func=lambda x: x.title(),
+        key="seasonality_type_traditional"
+    )
+
+    # --- Seasonality selectors (each must have a unique key)
+    c1, c2, c3 = st.columns(3)
+    weekly_seasonality_std = c1.selectbox(
+        "Weekly Seasonality", [True, False], index=1, key="weekly_traditional"
+    )
+    yearly_seasonality_std = c2.selectbox(
+        "Yearly Seasonality", [True, False], index=1, key="yearly_traditional"
+    )
+    steps_ahead_std = c3.number_input(
+        "Forecast horizon (steps ahead):",
+        min_value=1, max_value=90, value=30, step=1,
+        key="steps_ahead_std_window"
+    )
+
+    if st.button("Run Traditional Prophet Forecast", use_container_width=True, key="run_prophet_traditional"):
+        with st.spinner("Running standard Prophet forecast..."):
+            try:
+                result_prophet_std = prophet_forecast_standard(
+                    df,
+                    test_size=0.2,
+                    steps_ahead=steps_ahead_std,
+                    weekly_seasonality=weekly_seasonality_std,
+                    yearly_seasonality=yearly_seasonality_std,
+                    seasonality_mode=seasonality_type_std
+                )
+
+                st.session_state.prophet_result_traditional = result_prophet_std
+
+            except Exception as e:
+                st.error(f"⚠️ Error running Prophet forecast: {e}")
+
+
+    # --- Display results if available ---
+    if st.session_state.prophet_result_traditional is not None:
+        result_prophet_std = st.session_state.prophet_result_traditional
+        df_proc_p = result_prophet_std["df_processed"]
+
+        # --- Plot ---
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_proc_p["Date"], y=df_proc_p["Value"],
+            mode="lines", name="Actual", line=dict(color="lightblue", width=2)
+        ))
+        fig.add_trace(go.Scatter(
+            x=result_prophet_std["test_forecast"].index,
+            y=result_prophet_std["test_forecast"].values,
+            mode="lines", name="Forecast (Test)",
+            line=dict(color="orange", dash="dot", width=2)
+        ))
+        fig.add_trace(go.Scatter(
+            x=result_prophet_std["forecast_out"]["Date"],
+            y=result_prophet_std["forecast_out"]["Forecast"],
+            mode="lines", name="Forecast (Future)",
+            line=dict(color="green", dash="dot", width=2)
+        ))
+        fig.update_layout(
+            title=f"<b>Prophet Traditional Forecast</b><br>"
+                  f"MAPE: {result_prophet_std['mape']:.2f}% | RMSE: {result_prophet_std['rmse']:.2f}",
+            xaxis_title="Date", yaxis_title="Value",
+            legend=dict(x=0.01, y=0.99), template="plotly_white",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### Next Forecasts")
+        # --- Format the next forecast dataframe safely ---
+        forecast_out = result_prophet_std["forecast_out"].copy()
+        forecast_out["Date"] = pd.to_datetime(forecast_out["Date"]).dt.strftime("%Y-%m-%d")
+        forecast_out["Forecast"] = forecast_out["Forecast"].astype(float)
+
+        st.dataframe(
+            forecast_out.style.format({"Forecast": "{:,.2f}"}),
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+#  #-------------------------------------------------------------------
+# # PROPHET MODEL Rolling Mean (5days)
+# # -------------------------------------------------------------------
+
+# with col3:
+#     st.markdown("#### Prophet Forecasting - Rolling Mean - 5 days")
+
+#     seasonality_type_mean = st.selectbox(
+#         "Select seasonality type:",
+#         ["None","additive", "multiplicative",],
+#         index=1,
+#         format_func=lambda x: x.title()
+#     )
+
+#     # --- Seasonality selectors ---
+#     c1, c2, c3 = st.columns(3)
+#     daily_seasonality = c1.selectbox("Daily Seasonality", [True, False], index=1)
+#     weekly_seasonality = c2.selectbox("Weekly Seasonality", [True, False], index=1)
+#     yearly_seasonality = c3.selectbox("Yearly Seasonality", [True, False], index=1)
+
+#     # --- FOrecast horizon Out-of_sample ---
+#     steps_ahead_base = 2
+
+#     # --- Run Prophet Forecast ---
+#     if st.button("Run Prophet Forecast", use_container_width=True):
+#         with st.spinner("Running Prophet Forecast..."):
+#             try:
+#                 result_prophet = prophet_forecast_standard_rolling_mean(
+#                     df,
+#                     test_size=0.2,
+#                     steps_ahead=steps_ahead_base,
+#                     weekly_seasonality=weekly_seasonality,
+#                     yearly_seasonality=yearly_seasonality,
+#                     seasonality_mode=seasonality_type_mean,
+#                     changepoint_prior_scale = 0.8,  # or even 1.0
+#                     n_changepoints = 300,
+#                     changepoint_range = 1.0
+
+#                 )
+#                 st.session_state.prophet_result_mean = result_prophet  # ✅ persist
+
+#             except Exception as e:
+#                 st.error(f"⚠️ Error running Prophet forecast: {e}")
+
+#     # --- Display results if available ---
+#     if st.session_state.prophet_result_mean is not None:
+#         result_prophet = st.session_state.prophet_result_mean
+#         df_proc_p = result_prophet["df_processed"]
+
+#         # --- Plot ---
+#         fig = go.Figure()
+#         fig.add_trace(go.Scatter(
+#             x=df_proc_p["Date"], y=df_proc_p["Value"],
+#             mode="lines", name="Actual", line=dict(color="lightblue", width=2)
+#         ))
+#         fig.add_trace(go.Scatter(
+#             x=result_prophet["test_forecast"].index,
+#             y=result_prophet["test_forecast"].values,
+#             mode="lines", name="Forecast (Test/Rolling)",
+#             line=dict(color="green", dash="dot", width=2)
+#         ))
+#         fig.update_layout(
+#             title=f"<b>Prophet Rolling Forecast</b><br>"
+#                 f"MAPE: {result_prophet['mape']:.2f}% | RMSE: {result_prophet['rmse']:.2f}",
+#             xaxis_title="Date", yaxis_title="Value",
+#             legend=dict(x=0.01, y=0.99), template="plotly_white",
+#         )
+#         st.plotly_chart(fig, use_container_width=True)
+
+#         # --- Format the next forecast dataframe safely ---
+#         forecast_out = result_prophet["forecast_out"].copy()
+
+#         # Ensure Date is datetime and Forecast is numeric 1D
+#         forecast_out["Date"] = pd.to_datetime(forecast_out["Date"]).dt.strftime("%Y-%m-%d")
+#         forecast_out["Forecast"] = forecast_out["Forecast"].astype(float)
+
+#         # Create clean display dataframe
+#         forecast_prophet_df = forecast_out[["Date", "Forecast"]].reset_index(drop=True)
+
+#         st.markdown("#### Next Forecasts")
+#         st.dataframe(
+#             forecast_prophet_df.style.format({"Forecast": "{:,.2f}"}),
+#             use_container_width=True,
+#             hide_index=True
+#         )
+
+
+
+
+ #-------------------------------------------------------------------
+# PROPHET MODEL Rolling Window
+# -------------------------------------------------------------------
+
+with col3:
+    st.markdown("#### Prophet Forecasting - Rolling Window")
+
+    seasonality_type_window = st.selectbox(
+        "Select seasonality type:",
+        ["None","additive", "multiplicative",],
+        index=1,
+        format_func=lambda x: x.title()
+    )
+
+    # --- Seasonality selectors ---
+    c1, c2, c3 = st.columns(3)
+    #daily_seasonality_roll = c1.selectbox("Daily Seasonality", [True, False], index=1)
+    weekly_seasonality_roll = c1.selectbox("Weekly Seasonality", [True, False], index=1)
+    yearly_seasonality_roll = c2.selectbox("Yearly Seasonality", [True, False], index=1)
+    steps_ahead_base = c3.number_input(
+        "Forecast horizon (steps ahead):",
+        min_value=1, max_value=90, value=30, step=1,
+        key="steps_ahead_window"
+    )
+
+    # --- Run Prophet Forecast ---
+    if st.button("Run Prophet Forecast", use_container_width=True):
+        with st.spinner("Running Prophet Forecast..."):
+            try:
+                result_prophet = prophet_forecast_standard_expanding_window(
+                    df,
+                    steps_ahead=steps_ahead_base,
+                    weekly_seasonality=weekly_seasonality_roll,
+                    yearly_seasonality=yearly_seasonality_roll,
+                    seasonality_mode=seasonality_type_window,
+                    changepoint_prior_scale = 0.8,  # or even 1.0
+                    n_changepoints = 300,
+                    changepoint_range = 1.0
+
+                )
+                st.session_state.prophet_result_window = result_prophet  # ✅ persist
+
+            except Exception as e:
+                st.error(f"⚠️ Error running Prophet forecast: {e}")
+
+    # --- Display results if available ---
+    if st.session_state.prophet_result_window is not None:
+        result_prophet = st.session_state.prophet_result_window
+        df_proc_p = result_prophet["df_processed"]
+
+        # --- Plot ---
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_proc_p["Date"], y=df_proc_p["Value"],
+            mode="lines", name="Actual", line=dict(color="lightblue", width=2)
+        ))
+        fig.add_trace(go.Scatter(
+            x=result_prophet["rolling_forecast"].index,
+            y=result_prophet["rolling_forecast"].values,
+            mode="lines",
+            name="Forecast (Rolling)",
+            line=dict(color="orange", dash="dot", width=2)
+        ))
+        fig.add_trace(go.Scatter(
+            x=result_prophet["forecast_out"]["Date"],
+            y=result_prophet["forecast_out"]["Forecast"],
+            mode="lines", name="Forecast (Future)",
+            line=dict(color="green", dash="dot", width=2)
+        ))
+        fig.update_layout(
+            title=f"<b>Prophet Rolling Forecast</b><br>"
+                f"MAPE: {result_prophet['mape']:.2f}% | RMSE: {result_prophet['rmse']:.2f}",
+            xaxis_title="Date", yaxis_title="Value",
+            legend=dict(x=0.01, y=0.99), template="plotly_white",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- Format the next forecast dataframe safely ---
+        forecast_out = result_prophet["forecast_out"].copy()
+
+        # Ensure Date is datetime and Forecast is numeric 1D
+        forecast_out["Date"] = pd.to_datetime(forecast_out["Date"]).dt.strftime("%Y-%m-%d")
+        forecast_out["Forecast"] = forecast_out["Forecast"].astype(float)
+
+        # Create clean display dataframe
+        forecast_prophet_df = forecast_out[["Date", "Forecast"]].reset_index(drop=True)
+
+        st.markdown("#### Next Forecasts")
+        st.dataframe(
+            forecast_prophet_df.style.format({"Forecast": "{:,.2f}"}),
+            use_container_width=True,
+            hide_index=True
+        )
