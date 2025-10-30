@@ -5,13 +5,13 @@
 
 The **AI Time-Series Agent** functions as a Data Scientist — a system that understands, models, and explains time-series data provided by the Brazilian Cebtral Bank indicators (for now).
 
-I have built an interactive forecasting and analytics web app that combines **classical time-series models** (ARIMA, Holt-Winters, Exponential Smoothing) with **LLM-based reasoning** (GPT-4o-mini or LLaMA).  
+This web app unifies statistical forecasting models (ARIMA, Holt-Winters, Exponential Smoothing, Prophet) and state-of-the-art deep learning architectures (LSTM, N-BEATS, Transformers), leveraging LLM reasoning (GPT-4o-mini OpenAI) for interpretability and adaptive insights
 
 Built with **Python + Streamlit**, this project automates the full time-series workflow — from **data ingestion and diagnostics** to **forecasting and AI-powered interpretation**.
 
 ## Workflow Overview:
 
-1. **Data Retrieval:** via BACEN’s API or CSV uploads.  
+1. **Data Retrieval:** via BACEN’s API.  
 2. **Statistical Diagnostics:** Augmented Dickey–Fuller (ADF), Skewness, Kurtosis, Jarque-Bera, Ljung-Box, ARCH tests.  
 3. **ACF/PACF Visualization:** to identify AR/MA structures and check for stationarity.  
 4. **Baseline Forecasting:** Single, Double, and Holt-Winters exponential smoothing models.  

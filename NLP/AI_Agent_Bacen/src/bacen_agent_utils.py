@@ -34,7 +34,7 @@ from tqdm import trange  # lib for progress bars
 from neuralforecast import NeuralForecast
 from neuralforecast.models import NBEATS
 from neuralforecast.losses.pytorch import DistributionLoss
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
+#from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
 
 # Prophet
 from prophet import Prophet
@@ -43,7 +43,8 @@ from prophet import Prophet
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 
-warnings.filterwarnings("ignore")
+import warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 
 BACEN_TOP_SERIES = {
@@ -629,22 +630,22 @@ def plot_residual_diagnostics(residuals):
     fig, axes = plt.subplots(2, 2, figsize=(10, 6))
     #fig.suptitle(f"Residual Diagnostics", fontsize=10, fontweight="bold")
 
-    # 1️⃣ Residuals over time
+    # Residuals over time
     axes[0, 0].plot(residuals, color="black", linewidth=1, marker="o", markersize=3)
     axes[0, 0].axhline(0, color="red", linestyle="--", linewidth=1)
     axes[0, 0].set_title("Residuals vs Time")
     axes[0, 0].set_xlabel("Time")
     axes[0, 0].set_ylabel("Residual")
 
-    # 2️⃣ ACF Plot
+    # ACF Plot
     plot_acf(residuals, ax=axes[0, 1], lags=20, title="Autocorrelation (ACF)")
 
-    # 3️⃣ Histogram + KDE
+    # Histogram + KDE
     sns.histplot(residuals, kde=True, ax=axes[1, 0], color="gray")
     axes[1, 0].set_title("Residual Distribution")
     axes[1, 0].set_xlabel("Residuals")
 
-    # 4️⃣ QQ Plot
+    # QQ Plot
     from scipy import stats
     stats.probplot(residuals, dist="norm", plot=axes[1, 1])
     axes[1, 1].set_title("QQ Plot (Normality Check)")
@@ -786,7 +787,6 @@ def baseline_forecast(
     rmse = np.sqrt(np.mean((y_test - rolling_forecast) ** 2))
 
     # --- Output summary ---
-    print(f"📅 Detected frequency: {freq}")
     print(f"🧾 Train: {len(y_train)}, Test: {len(y_test)}, Steps ahead: {steps_ahead}")
     print(f"Last observed date: {last_date} → First forecast date: {forecast_out.index[0]}")
     print(f"📊 MAPE: {mape:.2f}% | RMSE: {rmse:.2f}")
@@ -913,6 +913,11 @@ def prophet_forecast_standard(
     forecast_test_series = pd.Series(y_pred, index=test_df["ds"], name="Forecast (Test)")
     forecast_full = pd.concat([train_df.set_index("ds")["y"], forecast_test_series], axis=0)
 
+    # -- Residual Error Diagnostics --#
+    residuals = y_true - y_pred
+    resid_mean = np.mean(residuals)
+    resid_std = np.std(residuals)
+
     # --- Return results ---
     result = {
         "train_df": train_df,
@@ -925,137 +930,17 @@ def prophet_forecast_standard(
         "rmse": rmse,
         "freq": freq,
         "df_processed": df,
-        "model": model
+        "model": model,
+        "residuals": residuals,
+        "residuals_summary": {
+            "mean": resid_mean,
+            "std": resid_std,
+            "skew": stats.skew(residuals),
+            "kurtosis": stats.kurtosis(residuals)
+        },
     }
 
     return result
-
-
-
-
-
-def prophet_forecast_standard_expanding_window(
-        df,
-        initial_test_size=0.2,
-        steps_ahead=30,
-        weekly_seasonality=True,
-        yearly_seasonality=True,
-        seasonality_mode="additive",
-        changepoint_prior_scale=0.8,
-        n_changepoints=300,
-        changepoint_range=1.0,
-        show_progress=True
-    ):
-    """
-    Prophet expanding-window forecast:
-    - First train on 80% of data
-    - Forecast 30 steps ahead
-    - Expand training window by 30 and repeat
-    """
-
-    df = df.copy()
-    if "Value" not in df.columns:
-        df = df.rename(columns={df.columns[-1]: "Value"})
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date")
-
-    freq = pd.infer_freq(df["Date"]) or "D"
-    print(f"📈 Detected frequency: {freq}")
-
-    # Prophet format
-    df_prophet = df.rename(columns={"Date": "ds", "Value": "y"})
-    df_prophet["y"] = np.log(df_prophet["y"]).rolling(5, center=True).mean()
-    df_prophet = df_prophet.dropna(subset=["y"]).reset_index(drop=True)
-
-    # Split once
-    split_idx = int(len(df_prophet) * (1 - initial_test_size))
-    train_df = df_prophet.iloc[:split_idx]
-    test_df  = df_prophet.iloc[split_idx:].reset_index(drop=True)
-
-    total_test = len(test_df)
-    n_rolls = int(np.ceil(total_test / steps_ahead))
-    print(f"🔁 Expanding-window forecast: {n_rolls} iterations | horizon={steps_ahead}")
-
-    preds, pred_dates = [], []
-
-    start_time = time.time()
-
-    # Rolling expanding window
-    for i in tqdm(range(n_rolls), disable=not show_progress):
-        # Forecast horizon slice
-        start = i * steps_ahead
-        end   = min(start + steps_ahead, total_test)
-        print(total_test)
-        test_chunk = test_df.iloc[start:end]
-        if len(test_chunk) == 0:
-            break
-
-        # Fit Prophet model
-        model = Prophet(
-            seasonality_mode=seasonality_mode,
-            weekly_seasonality=weekly_seasonality,
-            yearly_seasonality=yearly_seasonality,
-            changepoint_prior_scale=changepoint_prior_scale,
-            n_changepoints=n_changepoints,
-            changepoint_range=changepoint_range
-        )
-        model.add_seasonality('monthly', period=30.5, fourier_order=10)
-        model.add_seasonality('quarterly', period=90, fourier_order=5)
-        model.fit(train_df)
-
-        # Generate future dates (30 steps ahead)
-        last_date = train_df["ds"].max()
-        future_dates = pd.date_range(start=last_date, periods=steps_ahead + 1, freq=freq)[1:]
-        future_df = pd.DataFrame({"ds": future_dates})
-
-        forecast = model.predict(future_df)
-
-        # Store predictions
-        preds.extend(np.exp(forecast["yhat"].values[:len(test_chunk)]))
-        pred_dates.extend(test_chunk["ds"].values[:len(test_chunk)])
-
-        # Expand training window by adding this test chunk
-        train_df = pd.concat([train_df, test_chunk], ignore_index=True)
-
-    # --- Build rolling forecast series ---
-    rolling_forecast = pd.Series(preds, index=pd.to_datetime(pred_dates), name="Rolling Forecast")
-
-    # --- Metrics ---
-    actual = df_prophet.set_index("ds").loc[rolling_forecast.index, "y"]
-    actual = np.exp(actual)
-    mape = np.mean(np.abs((actual - rolling_forecast) / actual)) * 100
-    rmse = np.sqrt(np.mean((actual - rolling_forecast) ** 2))
-
-    print(f"📊 Rolling MAPE: {mape:.2f}% | RMSE: {rmse:.2f} | ⏱ {time.time()-start_time:.1f}s")
-
-    # --- Final full model for out-of-sample forecast ---
-    final_model = Prophet(
-        seasonality_mode=seasonality_mode,
-        weekly_seasonality=weekly_seasonality,
-        yearly_seasonality=yearly_seasonality,
-        changepoint_prior_scale=changepoint_prior_scale,
-        n_changepoints=n_changepoints,
-        changepoint_range=changepoint_range
-    )
-    final_model.add_seasonality('monthly', period=30.5, fourier_order=10)
-    final_model.add_seasonality('quarterly', period=90, fourier_order=5)
-    final_model.fit(df_prophet)
-
-    future_full = final_model.make_future_dataframe(periods=steps_ahead, freq=freq)
-    forecast_out = final_model.predict(future_full).tail(steps_ahead)[["ds", "yhat"]]
-    forecast_out.columns = ["Date", "Forecast"]
-    forecast_out["Forecast"] = np.exp(forecast_out["Forecast"])
-
-    results =  {
-        "rolling_forecast": rolling_forecast,
-        "mape": mape,
-        "rmse": rmse,
-        "forecast_out": forecast_out,
-        "df_processed": df
-    }
-
-    return results 
-
 
 
 def prophet_forecast_rolling(
@@ -1276,6 +1161,11 @@ def prophet_forecast_standard_expanding_window(
 
     print(f"📊 Final Rolling MAPE: {mape:.2f}% | RMSE: {rmse:.2f} | ⏱ {time.time()-start_time:.1f}s")
 
+    # -- Error diagnostics
+    residuals = actual - rolling_forecast
+    resid_mean = np.mean(residuals)
+    resid_std = np.std(residuals)
+ 
     # --- Final model (fit on all data) ---
     final_model = Prophet(
         seasonality_mode=seasonality_mode,
@@ -1310,7 +1200,14 @@ def prophet_forecast_standard_expanding_window(
         "forecast_out": forecast_out,
         "freq": freq,
         "df_processed": df,
-        "model": final_model
+        "model": final_model,
+        "residuals": residuals,
+        "residuals_summary": {
+            "mean": resid_mean,
+            "std": resid_std,
+            "skew": stats.skew(residuals),
+            "kurtosis": stats.kurtosis(residuals)
+        },
     }
 
     return results
