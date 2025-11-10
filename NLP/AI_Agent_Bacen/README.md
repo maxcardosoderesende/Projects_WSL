@@ -102,4 +102,4 @@ The framework supports seamless extension to other APIs or private datasets, sho
 
 **Max Cardoso de Resende**  
 📧 [maxscardosoderesende@gmail.com](mailto:maxscardosoderesende@gmail.com)  
-🔗 [linkedin.com/in/maxcardoso](https://www.linkedin.com/in/max-resende-006757b0/)
+🔗 [linkedin.com/in/maxresende](https://www.linkedin.com/in/max-resende-006757b0/)
