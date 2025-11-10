@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import seaborn as sns
 
+# AWS-Chromos
+from chronos import ChronosPipeline
+
+
 from src.bacen_agent_utils import (
     bacen_agent_load_similarity_openai,
     bacen_agent_plot_series,
@@ -21,7 +25,9 @@ from src.bacen_agent_utils import (
     plot_residual_diagnostics,
     baseline_forecast,
     prophet_forecast_standard,
-    prophet_forecast_standard_expanding_window
+    prophet_forecast_standard_expanding_window,
+    aws_chromos,
+    run_arima
 )
 
 warnings.filterwarnings("ignore")
@@ -41,7 +47,8 @@ client = load_openai_client()
 # Session State Initialization
 # -------------------------------------------------
 for key in ["df", "code", "tab_raw", "tab_diff", "ai_text_raw", "ai_text_diff", "ai_text_lags",
-             "baseline_result", "prophet_result_mean", "prophet_result_traditional", 'prophet_result_window']:
+             "baseline_result", "prophet_result_mean", "prophet_result_traditional", 'prophet_result_window',
+             'aws_chromos_result', 'arima_result']:
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -98,9 +105,6 @@ st.markdown(
     """
 )
 
-# -------------------------------------------------
-# Prompt + Dates
-# -------------------------------------------------
 prompt = st.text_input("🗣️ Enter your prompt:", placeholder="e.g., saldo poupanca SBPE")
 
 col1, col2 = st.columns(2)
@@ -336,6 +340,7 @@ with col1:
             try:
                 result_baseline = baseline_forecast(
                     df,
+                    test_size = 0.2,
                     model_type=model_type,
                     alpha=alpha,
                     beta=beta,
@@ -352,21 +357,37 @@ with col1:
     # ✅ Show previous results (if exist)
     if st.session_state.baseline_result is not None:
         result = st.session_state.baseline_result
-        df_proc = result["df_processed"]
+        df_hist = result["df_processed"]
+        df_proc_baseline = result['forecast_df']
+        metrics_baseline = result['metrics']
+        pred_forecast = df_proc_baseline[df_proc_baseline["type"] == "rolling_eval"]
+        out_of_sample_forecast = df_proc_baseline[df_proc_baseline["type"] == "out_of_sample"]
 
         # ---- Chart ----
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df_proc.index, y=df_proc["Value"],
+        fig.add_trace(go.Scatter(x=df_hist.index, y=df_hist["Value"],
                                  mode="lines", name="Actual", line=dict(color="lightblue", width=2)))
-        fig.add_trace(go.Scatter(x=result["rolling_forecast"].index, y=result["rolling_forecast"],
-                                 mode="lines", name="Forecast (rolling)",
-                                 line=dict(color="orange", dash="dot", width=2)))
-        fig.add_trace(go.Scatter(x=result["forecast_out"]["Date"],y=result["forecast_out"]["Forecast"],
-                                mode="lines", name="Forecast (Future)",
-                                line=dict(color="green", dash="dot", width=2)))
+        fig.add_trace(go.Scatter(
+                x=pred_forecast ["Date"],
+                y=pred_forecast ["Forecast"],
+                mode="lines",
+                name="Forecast (Rolling)",
+                line=dict(color="orange", dash="dot", width=2)
+            ))
+
+        fig.add_trace(go.Scatter(
+            x=out_of_sample_forecast["Date"],
+            y=out_of_sample_forecast ["Forecast"],
+            mode="lines",
+            name="Forecast (Out-of-sample)",
+            line=dict(color="green", dash="dot", width=2)
+        ))
         fig.update_layout(
-            title=f"<b>{model_type.title()} Rolling Forecast</b><br>"
-                  f"MAPE: {result['mape']:.2f}% | RMSE: {result['rmse']:.2f}",
+            title=(
+                f"<b>BASELINE Acc Metrics</b><br>"
+                f"MAPE: {metrics_baseline['MAPE']:.2f}% | "
+                f"MAE: {metrics_baseline['MAE']:.2f}"
+            ),
             xaxis_title="Date",
             yaxis_title="Value",
             legend=dict(x=0.01, y=0.99),
@@ -375,12 +396,14 @@ with col1:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("#### Next Forecasts")
+        st.markdown("#### Out-of-sample Forecasts")
         # --- Format the next forecast dataframe safely ---
 
-        forecast_out = result["forecast_out"].copy()
+        forecast_out = out_of_sample_forecast.copy()
         forecast_out["Date"] = pd.to_datetime(forecast_out["Date"]).dt.strftime("%Y-%m-%d")
         forecast_out["Forecast"] = forecast_out["Forecast"].astype(float)
+
+        forecast_out = forecast_out[['Date', 'Forecast']]
 
         st.dataframe(forecast_out.style.format({"Forecast": "{:,.2f}"}),
                      width='stretch', hide_index=True)
@@ -415,7 +438,7 @@ with col2:
         "Yearly Seasonality", [True, False], index=1, key="yearly_traditional"
     )
     steps_ahead_std = c3.number_input(
-        "Forecast horizon (steps ahead):",
+        "Out-of-sample Forecasts",
         min_value=1, max_value=90, value=30, step=1,
         key="steps_ahead_std_window"
     )
@@ -463,13 +486,13 @@ with col2:
         ))
         fig.update_layout(
             title=f"<b>Prophet Traditional Forecast</b><br>"
-                  f"MAPE: {result_prophet_std['mape']:.2f}% | RMSE: {result_prophet_std['rmse']:.2f}",
+                  f"MAPE: {result_prophet_std['mape']:.2f}% | MAE: {result_prophet_std['mae']:.2f}",
             xaxis_title="Date", yaxis_title="Value",
             legend=dict(x=0.01, y=0.99), template="plotly_white",
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("#### Next Forecasts")
+        st.markdown("#### Out-of-sample Forecasts")
         forecast_out = result_prophet_std["forecast_out"].copy()
         forecast_out["Date"] = pd.to_datetime(forecast_out["Date"]).dt.strftime("%Y-%m-%d")
         forecast_out["Forecast"] = forecast_out["Forecast"].astype(float)
@@ -507,7 +530,7 @@ with col3:
     weekly_seasonality_roll = c1.selectbox("Weekly Seasonality", [True, False], index=1)
     yearly_seasonality_roll = c2.selectbox("Yearly Seasonality", [True, False], index=1)
     steps_ahead_base = c3.number_input(
-        "Forecast horizon (steps ahead):",
+        "Out-of-sample Forecasts",
         min_value=1, max_value=90, value=30, step=1,
         key="steps_ahead_window"
     )
@@ -527,7 +550,7 @@ with col3:
                     changepoint_range = 1.0
 
                 )
-                st.session_state.prophet_result_window = result_prophet  # ✅ persist
+                st.session_state.prophet_result_window = result_prophet  
 
             except Exception as e:
                 st.error(f"⚠️ Error running Prophet forecast: {e}")
@@ -535,7 +558,6 @@ with col3:
     # --- Display results if available ---
     if st.session_state.prophet_result_window is not None:
         result_prophet = st.session_state.prophet_result_window
-        print("Result Prophet keys:", result_prophet.keys())
         df_proc_p = result_prophet["df_processed"]
         
         # --- Plot ---
@@ -559,7 +581,7 @@ with col3:
         ))
         fig.update_layout(
             title=f"<b>Prophet Rolling Forecast</b><br>"
-                f"MAPE: {result_prophet['mape']:.2f}% | RMSE: {result_prophet['rmse']:.2f}",
+                f"MAPE: {result_prophet['mape']:.2f}% | MAE: {result_prophet['mae']:.2f}",
             xaxis_title="Date", yaxis_title="Value",
             legend=dict(x=0.01, y=0.99), template="plotly_white",
         )
@@ -575,7 +597,7 @@ with col3:
         # Create clean display dataframe+69857
         forecast_prophet_df = forecast_out[["Date", "Forecast"]].reset_index(drop=True)
 
-        st.markdown("#### Next Forecasts")
+        st.markdown("#### Out-of-sample Forecasts")
         st.dataframe(
             forecast_prophet_df.style.format({"Forecast": "{:,.2f}"}),
             use_container_width=True,
@@ -586,3 +608,205 @@ with col3:
         resid_exp_window = result_prophet["residuals"]
         fig_resid = plot_residual_diagnostics(resid_exp_window)
         st.pyplot(fig_resid, width='stretch')
+
+
+st.markdown('<div class="dashed-line"></div>', unsafe_allow_html=True)
+
+## === Two-column layout ===
+col1, col2 = st.columns(2)
+
+# -------------------------------------------------------------------
+# BASELINE MODEL (EXPONENTIAL SMOOTHING)
+# -------------------------------------------------------------------
+with col1:
+    st.markdown("#### AWS Chromos: Re-feeding")
+
+    c1, = st.columns(1)
+    steps_ahead_aws = c1.number_input(
+            "Out-of-sample Forecasts",
+            min_value=1, max_value=90, value=30, step=1,
+            key="steps_ahead_window_aws"
+        )
+
+    pipeline = ChronosPipeline.from_pretrained("amazon/chronos-t5-tiny")
+
+    if st.button("🚀 Run AWS Chromos", use_container_width=True):
+        with st.spinner("Running AWS Chromos..."):
+            try:
+                result_aws = aws_chromos(
+                    df,
+                    pipeline=pipeline,
+                    test_size=0.2,
+                    prediction_length=30,
+                    num_samples=20,
+                    steps_ahead = steps_ahead_aws
+                )
+                # ✅ Persist results
+                st.session_state.aws_chromos_result = result_aws
+
+            except Exception as e:
+                st.error(f"⚠️ Error in AWS Chromos Forecastforecast: {e}")
+
+    # Show previous results (if exist)
+    if st.session_state.aws_chromos_result  is not None:
+        result_aws = st.session_state.aws_chromos_result 
+        df_history =  result_aws['df_processed']
+        df_proc_aws = result_aws["results_df_aws"]
+        metrics_aws = result_aws["metrics"]
+
+        # ---- Chart ----
+
+        # Separate in-sample and out-of-sample forecasts
+        pred_forecast = df_proc_aws[df_proc_aws["type"] == "rolling_eval"]
+        out_of_sample_forecast = df_proc_aws[df_proc_aws["type"] == "out_of_sample"]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df_history['timestamp'], y=df_history["target"],
+                                 mode="lines", name="Actual", line=dict(color="lightblue", width=2)))
+        fig.add_trace(go.Scatter(
+            x=pred_forecast ["timestamp"],
+            y=pred_forecast ["forecast_value"],
+            mode="lines",
+            name="Forecast (Rolling)",
+            line=dict(color="orange", dash="dot", width=2)
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=out_of_sample_forecast["timestamp"],
+            y=out_of_sample_forecast ["forecast_value"],
+            mode="lines",
+            name="Forecast (Out-of-sample)",
+            line=dict(color="green", dash="dot", width=2)
+        ))
+        fig.update_layout(
+            title=(
+                f"<b>AWS Chronos Acc Metrics</b><br>"
+                f"MAPE: {metrics_aws['MAPE']:.2f}% | "
+                f"MAE: {metrics_aws['MAE']:.2f}"
+            ),
+            xaxis_title="Date",
+            yaxis_title="Value",
+            legend=dict(x=0.01, y=0.99),
+            template="plotly_white",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### Out-of-sample Forecasts")
+        # --- Format the next forecast dataframe safely ---
+
+        forecast_out =  out_of_sample_forecast.copy()
+        forecast_out["timestamp"] = pd.to_datetime(forecast_out["timestamp"]).dt.strftime("%Y-%m-%d")
+        forecast_out["forecast_value"] = forecast_out["forecast_value"].astype(float)
+
+        forecast_out = forecast_out[['timestamp', 'forecast_value']]
+        forecast_out.rename(columns = {"timestamp": "Date", "forecast_value":"Forecast"} , inplace = True)
+        st.dataframe(forecast_out.style.format({"Forecast": "{:,.2f}"}),
+                     width='stretch', hide_index=True)
+
+
+        st.markdown('#### Error Diagnostics')
+        residuals = result_aws["residuals"]
+        fig_resid = plot_residual_diagnostics(residuals)
+        st.pyplot(fig_resid, width='stretch')
+    
+
+    with col2:
+        st.markdown("#### ARIMA - Rolling Window")
+
+        c1, c2, c3, c4 = st.columns(4)
+        ar_arima = c1.number_input(
+            "AR lags:",
+            min_value=1, max_value=2, value=1,
+            key="ar_arima"
+        )
+        ma_arima = c2.number_input(
+            "MA lags:",
+            min_value=1, max_value=2, value=1,
+            key="ma_arima"
+        )
+        diff_arima = c3.number_input(
+            "Differential level:",
+            min_value=1, max_value=2, value=1,
+            key="diff_arima"
+        )
+        steps_ahead_arima = c4.number_input(
+            "Out-of-sample Forecasts",
+            min_value=1, max_value=90, value=30, step=1,
+            key="steps_ahead_window_arima"
+        )
+
+        if st.button("Run ARIMA", use_container_width=True):
+            with st.spinner("Running ARIMA expanding-window..."):
+                try:
+                    result_arima = run_arima(
+                        df, 
+                        test_size=0.2,
+                        p_lags=ar_arima, 
+                        q_lags=ma_arima, 
+                        d = diff_arima,
+                        steps_ahead=steps_ahead_arima
+                    )
+                    st.session_state.arima_result = result_arima
+                except Exception as e:
+                    st.error(f"⚠️ Error in ARIMA: {e}")
+
+        # Show previous results (if exist)
+        if st.session_state.arima_result  is not None:
+            result_arima = st.session_state.arima_result 
+            df_history_arima =  result_arima['df_processed']
+            df_proc_arima = result_arima["forecast_df"]
+            metrics_arima = result_arima["metrics"]
+
+            # ---- Chart ----
+            # Separate in-sample and out-of-sample forecasts
+            pred_forecast = df_proc_arima[df_proc_arima["type"] == "rolling_eval"]
+            out_of_sample_forecast = df_proc_arima[df_proc_arima["type"] == "out_of_sample"]
+            print(pred_forecast)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df_history_arima['Date'], y=df_history_arima["Value"],
+                                    mode="lines", name="Actual", line=dict(color="lightblue", width=2)))
+            fig.add_trace(go.Scatter(
+                x=pred_forecast ["Date"],
+                y=pred_forecast ["Forecast"],
+                mode="lines",
+                name="Forecast (Rolling)",
+                line=dict(color="orange", dash="dot", width=2)
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=out_of_sample_forecast["Date"],
+                y=out_of_sample_forecast ["Forecast"],
+                mode="lines",
+                name="Forecast (Out-of-sample)",
+                line=dict(color="green", dash="dot", width=2)
+            ))
+            fig.update_layout(
+                title=(
+                    f"<b>ARIMA Acc Metrics</b><br>"
+                    f"MAPE: {metrics_arima['MAPE']:.2f}% | "
+                    f"MAE: {metrics_arima['MAE']:.2f}"
+                ),
+                xaxis_title="Date",
+                yaxis_title="Value",
+                legend=dict(x=0.01, y=0.99),
+                template="plotly_white",
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### Out-of-sample Forecasts")
+            # --- Format the next forecast dataframe safely ---
+
+            forecast_out =  out_of_sample_forecast.copy()
+            forecast_out["Date"] = pd.to_datetime(forecast_out["Date"]).dt.strftime("%Y-%m-%d")
+            forecast_out["Forecast"] = forecast_out["Forecast"].astype(float)
+
+            forecast_out = forecast_out[['Date', 'Forecast']]
+            st.dataframe(forecast_out.style.format({"Forecast": "{:,.2f}"}),
+                        width='stretch', hide_index=True)
+
+            st.markdown('#### Error Diagnostics')
+            resid_exp_window = result_arima["residuals"]
+            fig_resid = plot_residual_diagnostics(resid_exp_window)
+            st.pyplot(fig_resid, width='stretch')

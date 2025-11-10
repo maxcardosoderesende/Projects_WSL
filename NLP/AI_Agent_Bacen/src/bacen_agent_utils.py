@@ -20,7 +20,7 @@ from requests.adapters import HTTPAdapter, Retry
 ## Timne-series diagnostics tests
 from scipy import stats
 ## langChain
-from sentence_transformers import SentenceTransformer
+
 from sklearn.metrics.pairwise import cosine_similarity
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.tsa.stattools import acf, pacf
@@ -29,19 +29,22 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.holtwinters import SimpleExpSmoothing, ExponentialSmoothing
 from tqdm import trange  # lib for progress bars
-
-## NBEATS
-from neuralforecast import NeuralForecast
-from neuralforecast.models import NBEATS
-from neuralforecast.losses.pytorch import DistributionLoss
-#from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
+from statsmodels.tsa.arima.model import ARIMA
 
 # Prophet
 from prophet import Prophet
 
+# AWS-Chromos
+from chronos import ChronosPipeline
+from pandas.tseries.frequencies import to_offset
+import torch
 
+# openAI
+from dotenv import load_dotenv
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
+
+from sklearn.metrics import mean_absolute_error
 
 import warnings
 warnings.filterwarnings("ignore", category=SyntaxWarning)
@@ -209,65 +212,6 @@ def bacen_agent_load(
     df = df.reset_index().rename(columns={"index": "Date", best_code: "Value"})
     print(f"Retrieved {len(df)} rows for code {best_code}.")
     return df, best_code
-
-
-# def bacen_agent_load_langchain(
-#     prompt,
-#     dictionary=BACEN_TOP_SERIES,
-#     start=None,
-#     end=None,
-#     cutoff=0.35,
-#     embedder=None,
-# ):
-#     """
-#     Intelligent BACEN data retriever & analyzer using sentence_transformers embeddings.
-#     1. Uses semantic similarity (SentenceTransformer) to match prompt → BACEN code.
-#     2. Fetches data automatically.
-#     3. Returns df, code, and similarity score.
-#     """
-
-#     if start is None:
-#         start = "2020-01-01"
-
-#     if end is None:
-#         end = pd.Timestamp.now().normalize()
-
-#     if embedder is None:
-#         raise ValueError(
-#             "Embedder not provided. Please pass a SentenceTransformer instance."
-#         )
-
-#     # --- Step 1: Vectorize your BACEN dictionary ( split keys and values) ---
-#     bacen_keys = list(dictionary.keys())
-#     bacen_codes = list(dictionary.values())
-#     bacen_embs = embedder.encode(
-#         bacen_keys, convert_to_numpy=True, normalize_embeddings=True
-#     )
-
-#     # --- Step 2: Semantic search ---
-#     q_emb = embedder.encode([prompt], normalize_embeddings=True)
-#     sims = cosine_similarity(q_emb, bacen_embs)[0]
-#     top_idx = sims.argmax()
-
-#     best_key = bacen_keys[top_idx]
-#     best_code = bacen_codes[top_idx]
-#     best_sim = sims[top_idx]
-
-#     print(
-#         f"Best series selected: '{best_key}' | Code: {best_code} | Similarity: {best_sim:.2f}"
-#     )
-
-#     # --- Step 3: Fetch BACEN data ---
-#     try:
-#         df = sgs.get(best_code, start=start, end=end)
-#         df = df.reset_index().rename(columns={"index": "Date", best_code: "Value"})
-#         print(f"Retrieved {len(df)} rows for code {best_code}.")
-#     except Exception as e:
-#         print(f"❌ Error retrieving series {best_code}: {e}")
-#         return pd.DataFrame(), best_code
-
-#     return df, best_code, best_key, best_sim
-
 
 
 # -------------------------------------------------
@@ -655,7 +599,6 @@ def plot_residual_diagnostics(residuals):
     return fig
 
 
-
 def baseline_forecast(
     df,
     model_type="single",
@@ -667,36 +610,36 @@ def baseline_forecast(
     steps_ahead=30
 ):
     """
-    Rolling baseline forecast with exponential smoothing variants.
+    Expanding-window baseline forecast (Single, Double, or Holt-Winters).
 
-    - Performs 80/20 train/test split
-    - Generates walk-forward predictions over test window
-    - Detects frequency (B vs D) and adjusts future forecast dates
-    - Returns fitted model + out-of-sample forecast
+    - Starts with 80% of data and expands
+    - Forecasts 30 steps ahead each iteration
+    - Ends with full-sample out-of-sample 30-step forecast
     """
 
-    # --- Prepare series ---
+    # --- Data prep ---
     df = df.copy()
     if "Value" not in df.columns:
         df = df.rename(columns={df.columns[-1]: "Value"})
 
     df["Date"] = pd.to_datetime(df["Date"])
-    last_date = df["Date"].max()
-    print(last_date)
     df = df.set_index("Date").sort_index()
     y = df["Value"].dropna()
 
-    # --- Split train/test (80/20) ---
+    # --- Split train/test ---
     split_idx = int(len(y) * (1 - test_size))
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-    preds = []
-    test_dates = y_test.index
+    # --- Default parameters ---
+    rolling_results = []
 
-    # --- Walk-forward forecasting ---
-    for t in range(len(y_test)):
-        y_window = pd.concat([y_train, y_test.iloc[:t]])
+    print(f"Expanding-window forecast: {steps_ahead} steps ahead per iteration")
 
+    # --- Expanding window (walk-forward 30 steps at a time) ---
+    for end_idx in range(split_idx, len(y) - steps_ahead + 1, steps_ahead):
+        y_window = y.iloc[:end_idx]
+
+        # Fit model based on type
         if model_type == "single":
             model = SimpleExpSmoothing(y_window)
             fit = model.fit(smoothing_level=alpha, optimized=(alpha is None))
@@ -721,16 +664,24 @@ def baseline_forecast(
                 smoothing_seasonal=gamma,
                 optimized=(alpha is None or beta is None or gamma is None)
             )
-
         else:
-            raise ValueError("Invalid model_type. Choose from 'single', 'double', or 'holtwinters'.")
+            raise ValueError("Invalid model_type")
 
-        preds.append(fit.forecast(1).iloc[0])
+        forecast_values = fit.forecast(steps_ahead)
+        test_segment = y.iloc[end_idx:end_idx + steps_ahead]
 
-    # --- Rolling results ---
-    rolling_forecast = pd.Series(preds, index=test_dates, name="RollingForecast")
+        temp = pd.DataFrame({
+            "Date": test_segment.index,
+            "Actual": test_segment.values,
+            "Forecast": forecast_values.values[:len(test_segment)],
+            "type": "rolling_eval"
+        })
+        rolling_results.append(temp)
 
-    # --- Final full model (fit on all data) --- Out-of-Sample forecasts
+    # Combine rolling forecasts
+    rolling_df = pd.concat(rolling_results, ignore_index=True) if rolling_results else pd.DataFrame()
+
+    # --- Final full-sample model (out-of-sample forecast) ---
     if model_type == "single":
         final_model = SimpleExpSmoothing(y).fit(smoothing_level=alpha, optimized=(alpha is None))
     elif model_type == "double":
@@ -747,73 +698,50 @@ def baseline_forecast(
             optimized=(alpha is None or beta is None or gamma is None)
         )
 
-    fitted = final_model.fittedvalues
-    forecast_values = final_model.forecast(steps_ahead)
+    forecast_out = final_model.forecast(steps_ahead)
+    last_date = y.index.max()
+    freq = pd.infer_freq(y.index) or "D"
+    future_dates = pd.date_range(last_date, periods=steps_ahead + 1, freq=freq)[1:]
 
-    # --- Frequency detection (D vs B) ---
-    freq = infer_date_frequency_forecast(df)
-
-    if freq is None or freq == "D":
-        # Check the index (not df["Date"]) for weekends
-        has_weekends = df.index.dayofweek.isin([5, 6]).any()
-
-        if not has_weekends:
-            freq = "B"  # Business days only (weekends missing)
-        else:
-            freq = "D"
-
-    # --- Future forecast (out-of-sample) ---
-    print(f"📅 Detected frequency: {freq}")
-
-    last_date = df.index.max()  # 
-    if freq == "B":
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=steps_ahead)
-    else:
-        future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=steps_ahead, freq=freq)
-
-    # Cresate out-of-sample forecast table
-    forecast_out = pd.DataFrame({
+    out_df = pd.DataFrame({
         "Date": future_dates,
-        "Forecast": forecast_values.values
+        "Actual": np.nan,
+        "Forecast": forecast_out.values,
+        "type": "out_of_sample"
     })
-    
+
+    # --- Combine all forecasts ---
+    forecast_df = pd.concat([rolling_df, out_df], ignore_index=True)
+
+    # --- Metrics (on rolling only) ---
+    mae = np.mean(np.abs(rolling_df["Actual"] - rolling_df["Forecast"]))
+    mask = rolling_df["Actual"] != 0
+    mape = np.mean(np.abs((rolling_df["Actual"][mask] - rolling_df["Forecast"][mask]) /
+                            rolling_df["Actual"][mask])) * 100
+
+    print(f"Baseline Expanding-window | MAPE: {mape:.2f}% | MAE: {mae:.2f}")
+
+    # --- Residual diagnostics ---
+    fitted = final_model.fittedvalues
     residuals = y - fitted
-    resid_mean = np.mean(residuals)
-    resid_std = np.std(residuals)
+    resid_summary = {
+        "mean": np.mean(residuals),
+        "std": np.std(residuals),
+        "skew": stats.skew(residuals),
+        "kurtosis": stats.kurtosis(residuals)
+    }
 
-
-    # --- Error metrics ---
-    mape = np.mean(np.abs((y_test - rolling_forecast) / y_test)) * 100
-    rmse = np.sqrt(np.mean((y_test - rolling_forecast) ** 2))
-
-    # --- Output summary ---
-    print(f"🧾 Train: {len(y_train)}, Test: {len(y_test)}, Steps ahead: {steps_ahead}")
-    print(f"Last observed date: {last_date} → First forecast date: {forecast_out.index[0]}")
-    print(f"📊 MAPE: {mape:.2f}% | RMSE: {rmse:.2f}")
-
-
-
-    # --- Final result dictionary ---
+    # --- Final result dict ---
     result = {
-        "train_size": len(y_train),
-        "test_size": len(y_test),
-        "rolling_forecast": rolling_forecast,
-        "fitted_values": fitted,
-        "forecast_out": forecast_out,
-        "mape": mape,
-        "rmse": rmse,
+        "forecast_df": forecast_df,
+        "metrics": {"MAE": mae,
+                     "MAPE": mape
+        },
         "freq": freq,
         "df_processed": df,
-        "model_summary": (
-            final_model.summary() if hasattr(final_model, "summary") else str(final_model.params)
-        ),
-        "residuals": residuals,
-        "residuals_summary": {
-            "mean": resid_mean,
-            "std": resid_std,
-            "skew": stats.skew(residuals),
-            "kurtosis": stats.kurtosis(residuals)
-        },
+        "residuals" : residuals,
+        "residuals_summary": resid_summary,
+        "model": final_model
     }
 
     return result
@@ -954,7 +882,7 @@ def prophet_forecast_rolling(
         changepoint_prior_scale=0.05):
     """
     Rolling-window Prophet forecast with correct alignment, metrics, and stability.
-    Similar to ARIMA one-step ahead rolling forecast
+    Similar to ARIMA one-step ahead rolling forecast 
     """
 
     # --- Data preparation ---
@@ -1157,6 +1085,7 @@ def prophet_forecast_standard_expanding_window(
     actual = df_prophet.set_index("ds").loc[rolling_forecast.index, "y"]
     actual = np.exp(actual)
     mape = np.mean(np.abs((actual - rolling_forecast) / actual)) * 100
+    mae = np.mean(np.abs(actual - rolling_forecast)) 
     rmse = np.sqrt(np.mean((actual - rolling_forecast) ** 2))
 
     print(f"📊 Final Rolling MAPE: {mape:.2f}% | RMSE: {rmse:.2f} | ⏱ {time.time()-start_time:.1f}s")
@@ -1197,6 +1126,7 @@ def prophet_forecast_standard_expanding_window(
         "rolling_forecast": rolling_forecast,
         "mape": mape,
         "rmse": rmse,
+        "mae": mae,
         "forecast_out": forecast_out,
         "freq": freq,
         "df_processed": df,
@@ -1211,11 +1141,6 @@ def prophet_forecast_standard_expanding_window(
     }
 
     return results
-
-
-
-
-
 
 
 def prophet_forecast_standard_rolling_mean(
@@ -1305,3 +1230,255 @@ def prophet_forecast_standard_rolling_mean(
     }
 
     return result
+
+
+'''initialize CHRONOS pipeline'''
+pipeline = ChronosPipeline.from_pretrained("amazon/chronos-t5-tiny")
+
+def aws_chromos(
+    df,
+    pipeline,
+    test_size=0.2,
+    prediction_length=30,
+    steps_ahead=30,
+    num_samples=20,
+):
+    """
+    AWS Chronos re-feed strategy (Streamlit-compatible)
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain 'timestamp' (or 'Date') and one numeric target column.
+    pipeline : Chronos pipeline
+        Pre-trained Chronos model (already loaded via `ChronosPipeline.from_pretrained()`).
+    test_size : float
+        Fraction of data to use for test split.
+    prediction_length : int
+        Forecast horizon.
+    steps_ahead : int
+        Step size for rolling window evaluation.
+    num_samples : int
+        Number of forecast samples to draw.
+    """
+
+    # --- Data preparation ---
+    df = df.copy()
+    if "target" not in df.columns:
+        df = df.rename(columns={df.columns[-1]: "target"})
+    if "timestamp" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "timestamp"})
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+
+    # --- Rolling forecast parameters ---
+    initial_train_size = int((1 - test_size) * len(df))
+    results = []
+
+    print('Starting Re-feeding different historical slices')
+    # --- Rolling in-sample forecasts ---
+    for end_idx in tqdm(range(initial_train_size, len(df) - prediction_length, steps_ahead)):
+        train_df = df.iloc[:end_idx]
+        test_df = df.iloc[end_idx:end_idx + prediction_length]
+
+        # Convert to tensor
+        values = torch.tensor(train_df["target"].values, dtype=torch.float32).unsqueeze(0)
+
+        # Forecast using pre-trained Chronos
+        preds = pipeline.predict(values, prediction_length=prediction_length, num_samples=num_samples)
+        forecast_np = preds.mean(dim=1).detach().cpu().numpy().flatten()
+
+        # Store results
+        temp = pd.DataFrame({
+            "timestamp": test_df["timestamp"].values,
+            "true_value": test_df["target"].values,
+            "forecast_value": forecast_np,
+            "type": "rolling_eval"
+        })
+        results.append(temp)
+
+    # Combine all rolling forecasts
+    results_df = pd.concat(results, ignore_index=True)
+
+    # -- Error diagnostics
+    residuals = results_df['true_value'] - results_df['forecast_value']
+    resid_mean = np.mean(residuals)
+    resid_std = np.std(residuals)
+
+    # --- Out-of-sample forecast ---
+    values_out = torch.tensor(df["target"].values, dtype=torch.float32).unsqueeze(0)
+    preds_out = pipeline.predict(values_out, prediction_length=prediction_length, num_samples=num_samples)
+    forecast_np_out = preds_out.mean(dim=1).detach().cpu().numpy().flatten()
+
+    # Future timestamps
+    last_date = pd.to_datetime(df["timestamp"]).max()
+    
+    # --- Frequency detection (business-day aware) ---
+    freq = infer_date_frequency_forecast(df)
+    if freq is None or freq == "D":
+        if not df["timestamp"].dt.dayofweek.isin([5, 6]).any():
+            freq = "B"  # Business days only
+        else:
+            freq = "D"
+    print(f"Detected frequency: {freq}")
+
+    future_dates = pd.date_range(last_date, periods=prediction_length + 1, freq=freq)[1:]
+
+    # Combine
+    out_df = pd.DataFrame({
+        "timestamp": future_dates,
+        "true_value": np.nan,
+        "forecast_value": forecast_np_out,
+        "type": "out_of_sample"
+    })
+
+    # Append together
+    results_df = pd.concat([results_df, out_df], ignore_index=True)
+
+    # --- Compute metrics (only for in-sample part) ---
+    eval_df = results_df[results_df["type"] == "rolling_eval"].dropna()
+
+    mae = mean_absolute_error(eval_df["true_value"], eval_df["forecast_value"])
+
+    mask = eval_df["true_value"] != 0
+    mape = np.mean(np.abs(
+        (eval_df["true_value"][mask] - eval_df["forecast_value"][mask]) /
+        eval_df["true_value"][mask]
+    )) * 100
+
+    # --- Return dictionary ---
+    results = {
+        "df_processed": df,
+        "results_df_aws": results_df,
+        "metrics": {
+            "MAE": mae,
+            "MAPE": mape,
+        },
+        "freq": freq,
+        "model": pipeline,
+        "residuals": residuals,
+        "residuals_summary": {
+            "mean": resid_mean,
+            "std": resid_std,
+            "skew": stats.skew(residuals),
+            "kurtosis": stats.kurtosis(residuals)
+        },
+    }
+
+    return results
+
+
+def run_arima(
+    df,
+    test_size: float = 0.2,
+    p_lags: int | None = None,
+    q_lags: int | None = None,
+    d: int = 0,
+    steps_ahead: int = 30
+):
+    """
+    Expanding-window ARIMA(p,d,q) forecast.
+    Starts with 80% of data, predicts next 30 steps repeatedly,
+    then performs a final out-of-sample 30-step forecast.
+
+    Returns
+    -------
+    dict with:
+        - forecast_df: rolling + out-of-sample forecasts
+        - metrics: MAE, RMSE, MAPE
+        - model: last fitted ARIMA model
+        - freq: detected frequency
+    """
+
+    # --- Data preparation ---
+    df = df.copy()
+    if "Value" not in df.columns:
+        df = df.rename(columns={df.columns[-1]: "Value"})
+    if "Date" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "Date"})
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date").reset_index(drop=True)
+    df = df.dropna(subset=["Value"])
+
+    # --- Rolling forecast parameters ---
+    initial_train_size = int((1 - test_size) * len(df))
+    p = p_lags if p_lags is not None else 1
+    q = q_lags if q_lags is not None else 1
+    results = []
+
+    # --- Expanding-window evaluation ---
+    print('Starting ARIMA Expanding-window evaluation')
+    for end_idx in range(initial_train_size, len(df) - steps_ahead, steps_ahead):
+        train_df = df.iloc[:end_idx]
+        test_df = df.iloc[end_idx:end_idx + steps_ahead]
+
+        model = ARIMA(train_df["Value"], order=(p, d, q))
+        fitted = model.fit()
+        forecast = fitted.forecast(steps=steps_ahead)
+        temp = pd.DataFrame({
+            "Date": test_df["Date"].values,
+            "actual": test_df["Value"].values,
+            "Forecast": forecast.values,
+            "type": "rolling_eval"
+        })
+        results.append(temp)
+
+
+    rolling_df = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+
+    # -- Error diagnostics
+    residuals = rolling_df['actual'] - rolling_df['Forecast']
+    resid_mean = np.mean(residuals)
+    resid_std = np.std(residuals)
+
+
+    # --- Final out-of-sample forecast ---
+    full_model = ARIMA(df["Value"], order=(p, d, q))
+    full_fit = full_model.fit()
+    forecast_out = full_fit.forecast(steps=steps_ahead)
+
+    last_date = df["Date"].iloc[-1]
+    freq = pd.infer_freq(df["Date"]) or "D"
+    future_dates = pd.date_range(last_date, periods=steps_ahead + 1, freq=freq)[1:]
+
+    out_df = pd.DataFrame({
+        "Date": future_dates,
+        "actual": np.nan,
+        "Forecast": forecast_out.values,
+        "type": "out_of_sample"
+    })
+
+    # --- Merge rolling + out-of-sample results ---
+    forecast_df = pd.concat([rolling_df, out_df], ignore_index=True)
+
+    # --- Compute metrics (only for in-sample part) ---
+
+    mae = mean_absolute_error(rolling_df["actual"], rolling_df["Forecast"])
+    mask = rolling_df["actual"] != 0
+    mape = np.mean(np.abs((rolling_df["actual"][mask] - rolling_df["Forecast"][mask]) /
+                            rolling_df["actual"][mask])) * 100
+
+
+    # --- Return everything ---
+    results = {
+        "df_processed": df,
+        "forecast_df": forecast_df,
+        "metrics": {
+            "MAE": mae,
+            "MAPE": mape
+        },
+        "model": full_fit,
+        "residuals": residuals,
+        "residuals_summary": {
+            "mean": resid_mean,
+            "std": resid_std,
+            "skew": stats.skew(residuals),
+            "kurtosis": stats.kurtosis(residuals)
+        },
+    }
+
+    return results
+
